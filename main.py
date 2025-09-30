@@ -5,6 +5,7 @@ import os
 import shutil
 import datetime
 import toml
+import requests
 
 from tqdm import tqdm
 from src.utils.config_loader import ConfigLoader
@@ -19,6 +20,44 @@ from transformers import CLIPProcessor, AutoImageProcessor
 # Если у тебя есть тренер — подключим. Иначе можешь временно закомментить.
 from src.train import train
 
+# ───────────────────── optionally load .env ─────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+# ───────────────────── Telegram helper ─────────────────────
+def _notify_telegram(text: str, enabled: bool = True) -> bool:
+    """Sends a message to TG if enabled and TELEGRAM_BOT_TOKEN/CHAT_ID are set.
+       Returns True/False and logs the reason for silence."""
+    if not enabled:
+        logging.info("TG notify: disabled by config")
+        return False
+    token   = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logging.info("TG notify: skipped (no TELEGRAM_BOT_TOKEN/CHAT_ID)")
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=8,
+        )
+        # Log what Telegram responded with
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {"raw": r.text}
+        if r.ok and isinstance(payload, dict) and payload.get("ok"):
+            logging.info("TG notify: sent")
+            return True
+        logging.warning(f"TG notify: API error {r.status_code} -> {payload}")
+        return False
+    except Exception as e:
+        logging.warning(f"TG notify failed: {e}")
+        return False
 
 def _any_split_exists(cfg, split_name: str) -> bool:
     """
@@ -52,6 +91,12 @@ def main():
     log_file = os.path.join(results_dir, "session_log.txt")
     setup_logger(logging.INFO, log_file=log_file)
     base_config.show_config()
+
+    use_tg = base_config.use_telegram
+    logging.info(f"use_telegram = {use_tg}  (env token={bool(os.getenv('TELEGRAM_BOT_TOKEN'))}, chat={bool(os.getenv('TELEGRAM_CHAT_ID'))})")
+
+    # startup ping — handy to confirm everything is connected
+    _notify_telegram(f"🚀 Start: <b>{model_name}</b>\n📁 {results_dir}", enabled=use_tg)
 
     # Сохраним копию конфига и место для оверрайдов поиска
     shutil.copy("config.toml", os.path.join(results_dir, "config_copy.toml"))
@@ -105,7 +150,11 @@ def main():
 
     # ──────────────────── 5. Режим prepare_only ────────────────────
     if base_config.prepare_only:
-        logging.info("== Режим prepare_only: только подготовка данных и кэша, без обучения ==")
+        logging.info("== prepare_only mode: only data preparation, no training ==")
+        _notify_telegram(
+            f"✅ <b>{model_name}</b>: prepare_only completed\n📁 {results_dir}",
+            enabled=use_tg
+        )
         return
 
     # ──────────────────── 6. Поиск/обучение ────────────────────────
@@ -129,6 +178,10 @@ def main():
             param_grid     = param_grid,
             default_values = default_values,
         )
+        _notify_telegram(
+            f"✅ <b>{model_name}</b>: greedy search finished\n📁 {results_dir}",
+            enabled=use_tg
+        )
 
     elif search_type == "exhaustive":
         search_config = toml.load("search_params.toml")
@@ -143,6 +196,10 @@ def main():
             overrides_file = overrides_file,
             param_grid     = param_grid,
         )
+        _notify_telegram(
+            f"✅ <b>{model_name}</b>: exhaustive search finished\n📁 {results_dir}",
+            enabled=use_tg
+        )
 
     elif search_type == "none":
         logging.info("== Одиночная тренировка (без поиска параметров) ==")
@@ -151,6 +208,10 @@ def main():
             mm_loader   = train_loader,   # единый лоадер WSM
             dev_loaders = dev_loaders,
             test_loaders= test_loaders,
+        )
+        _notify_telegram(
+            f"✅ <b>{model_name}</b>: training (no search) completed\n📁 {results_dir}",
+            enabled=use_tg
         )
 
     else:
@@ -161,4 +222,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # crash notification always goes out so you know everything burned down
+        _notify_telegram(
+            f"❌ Crash: <code>{type(e).__name__}</code>\n{e}",
+            enabled=True
+        )
+        raise

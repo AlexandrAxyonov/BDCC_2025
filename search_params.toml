@@ -1,16 +1,17 @@
 [grid]
-hidden_dim = [128, 256, 512]
-# hidden_dim = [128]
+# hidden_dim = [128, 256, 512]
+hidden_dim = [128]
 # num_transformer_heads = [2,4,8]
-# tr_layers = [2,3,4]
-out_features = [128, 256, 512]
-# dropout = [0.1, 0.15, 0.2]
-# # scheduler_type = ["plateau","none"]
-lr = [1e-4, 1e-5]
-# weight_decay = [0.0, 1e-5]
-mamba_d_state         = [3,4,5]        # внутреннее состояние mamba
-mamba_ker_size        = [3,4]        # размер kernel
-mamba_layers = [3,4]
+# tr_layers = [2,3,4,5]
+# out_features = [128, 256, 512]
+# # dropout = [0.1, 0.15, 0.2]
+# # # scheduler_type = ["plateau","none"]
+# lr = [1e-4, 1e-5]
+# optimizer = ["adam" ,"adamw" ]
+# # weight_decay = [0.0, 1e-5]
+# mamba_d_state         = [5,6]        # внутреннее состояние mamba
+# mamba_ker_size        = [4,5]        # размер kernel
+# mamba_layers = [4,5]
 
 [defaults]
 hidden_dim = 512

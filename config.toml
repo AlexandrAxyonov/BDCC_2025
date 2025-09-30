@@ -1,3 +1,5 @@
+[general]
+use_telegram = true # Telegram notifications (you’ll need to provide your tokens)
 # ---------------------------
 # Настройки корпусов данных
 # ---------------------------
@@ -48,29 +50,29 @@ class_weighting = "balanced" # "none"
 # ---------------------------
 [train.model]
 # какую модель используем: "mamba" или "transformer"
-model_name            = "mamba"
+model_name            = "transformer"
 
-hidden_dim            = 256      # размер скрытого состояния
-out_features          = 256      # размер финальных признаков перед классификацией
-dropout               = 0.15      # dropout между слоями
+hidden_dim            = 128      # размер скрытого состояния
+out_features          = 512      # размер финальных признаков перед классификацией
+dropout               = 0.2      # dropout между слоями
 
 # ---- параметры для VideoFormer ----
 num_transformer_heads = 8        # количество attention голов в трансформере
 positional_encoding   = false    # использовать ли позиционное кодирование
-tr_layers             = 2        # число transformer-блоков
+tr_layers             = 5        # число transformer-блоков
 
 # ---- параметры для VideoMamba ----
-mamba_d_state         = 8        # внутреннее состояние mamba
-mamba_ker_size        = 3        # размер kernel
-mamba_layers          = 2        # число mamba-блоков
+mamba_d_state         = 6        # внутреннее состояние mamba
+mamba_ker_size        = 5        # размер kernel
+mamba_layers          = 5        # число mamba-блоков
 # mamba_d_discr         = 64       # discr dim (если не нужен — null)
 
 # ---------------------------
 # Параметры оптимизатора
 # ---------------------------
 [train.optimizer]
-optimizer = "adam"        # тип оптимизатора: "adam", "adamw", "lion", "sgd", "rmsprop"
-lr = 1e-5                 # начальная скорость обучения
+optimizer = "adamw"        # тип оптимизатора: "adam", "adamw", "lion", "sgd", "rmsprop"
+lr = 1e-4                 # начальная скорость обучения
 weight_decay = 0.0        # weight decay для регуляризации
 momentum = 0.9            # momentum (используется только в SGD)
 
@@ -83,10 +85,18 @@ warmup_ratio = 0.1         # отношение количества warmup-ит
 
 [embeddings]
 average_features = "raw" # Усредненние фичей - "mean"| "mean_std" | "raw"
+
+# Тип признаков, извлекаемых из видеоэкстрактора:
+# "frame-cls"  – CLS-вектор для каждого кадра (размерность hidden_size, напр. 768). Это дефолт, нормальный вариант для последовательностей по кадрам.
+# "frame-mean" – усреднение по всем батчам внутри кадра → [T, D].
+# "tokens"     – вернуть все батч-токены без усреднения, склеенные по времени → [T*(L-1), D]. Внимание: может сильно раздувать размер фичей.
+# "pooled"     – только для CLIP: стандартные эмбеддинги из get_image_features → [T, 512].
+video_output_mode = "frame-cls"
+
 video_extractor = "openai/clip-vit-base-patch32" # google/vit-base-patch16-224 или "openai/clip-vit-base-patch32"
 yolo_weights = "./src/data_loading/best_YOLO.pt"
 video_mode = "stable" # "stable" (track) | "fast" (predict)
-segment_length = 30  # сколько кадров отобрать из всех возможных с равномерным шагом
+segment_length = 10  # сколько кадров отобрать из всех возможных с равномерным шагом
 emb_normalize = false
 
 [cache]

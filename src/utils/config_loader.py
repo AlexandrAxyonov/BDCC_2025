@@ -18,6 +18,8 @@ class ConfigLoader:
         # ---------------------------
         # Общие параметры
         # ---------------------------
+        general_cfg = self.config.get("general", {})
+        self.use_telegram = general_cfg.get("use_telegram", False)
 
         # ---------------------------
         # Пути к данным
@@ -96,6 +98,7 @@ class ConfigLoader:
         # ---------------------------
         emb_cfg = self.config.get("embeddings", {})
         self.average_features = emb_cfg.get("average_features", "mean_std")
+        self.video_output_mode = emb_cfg.get("video_output_mode", "frame-cls")
         self.video_extractor = emb_cfg.get("video_extractor", "off")
         self.yolo_weights = emb_cfg.get("yolo_weights", "src/data_loading/best_YOLO.pt")
         self.video_mode = emb_cfg.get("video_mode", "stable")
