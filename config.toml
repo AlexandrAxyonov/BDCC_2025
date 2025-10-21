@@ -50,7 +50,10 @@ class_weighting = "balanced" # "none"
 # ---------------------------
 [train.model]
 # какую модель используем: "mamba" или "transformer"
-model_name            = "transformer"
+model_name            = "mamba"
+multi_label = true
+thr_dep = 0.5
+thr_park = 0.5
 
 hidden_dim            = 128      # размер скрытого состояния
 out_features          = 512      # размер финальных признаков перед классификацией
@@ -93,10 +96,10 @@ average_features = "raw" # Усредненние фичей - "mean"| "mean_std
 # "pooled"     – только для CLIP: стандартные эмбеддинги из get_image_features → [T, 512].
 video_output_mode = "frame-cls"
 
-video_extractor = "openai/clip-vit-base-patch32" # google/vit-base-patch16-224 или "openai/clip-vit-base-patch32"
+video_extractor = "openai/clip-vit-base-patch32" # google/vit-base-patch16-224 или "openai/clip-vit-base-patch32 " или google/vit-base-patch16-224-in21k
 yolo_weights = "./src/data_loading/best_YOLO.pt"
 video_mode = "stable" # "stable" (track) | "fast" (predict)
-segment_length = 10  # сколько кадров отобрать из всех возможных с равномерным шагом
+segment_length = 60  # сколько кадров отобрать из всех возможных с равномерным шагом
 emb_normalize = false
 
 [cache]

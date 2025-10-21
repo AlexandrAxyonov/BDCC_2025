@@ -42,6 +42,8 @@ class WSMBodyDataset(Dataset):
         self.dataset_name = dataset_name
         self.device     = device
 
+        self.multi_label: bool = bool(getattr(self.config, "multi_label", False))
+
         # параметры извлечения
         self.segment_length   = config.segment_length
         self.subset_size      = config.subset_size
@@ -149,6 +151,19 @@ class WSMBodyDataset(Dataset):
             f"indexed segments={len(self.meta)} / rows={len(self.df)}"
         )
 
+    def _to_multi_label_vec(self, class_id: int) -> torch.Tensor:
+        """
+        Маппинг single-label класса в 2-мерный multi-label вектор [dep, park]:
+          0 (control)   -> [0., 0.]
+          1 (depression)-> [1., 0.]
+          2 (parkinson) -> [0., 1.]
+        """
+        if class_id == 1:
+            return torch.tensor([1.0, 0.0], dtype=torch.float32)
+        if class_id == 2:
+            return torch.tensor([0.0, 1.0], dtype=torch.float32)
+        return torch.tensor([0.0, 0.0], dtype=torch.float32)
+
     # ─────────────────── feature caching ─────────────────── #
 
     def _prepare_body_cache(self) -> None:
@@ -246,10 +261,14 @@ class WSMBodyDataset(Dataset):
             self.dataset_name, self.split, key, getattr(self.config, "random_seed", 0), self.subset_size
         )
         features["body"] = cache.get(name, None)
-
-        return {
+        label_idx = int(base["label"])
+        out = {
             "sample_name": name,
             "video_path": base["video_path"],
-            "label": torch.tensor(base["label"], dtype=torch.long),
+            "label": torch.tensor(label_idx, dtype=torch.long),
             "features": features,
         }
+        if self.multi_label:
+            out["label_ml"] = self._to_multi_label_vec(label_idx)  # float32, форма [2]
+
+        return out

@@ -14,14 +14,47 @@ def wsm_collate_fn(batch: List[Dict[str, Any]]):
     batch = [b for b in batch if b is not None]
     if not batch:
         return None
+
     names  = [b["sample_name"] for b in batch]
     vpaths = [b["video_path"] for b in batch]
-    labels = torch.stack([torch.as_tensor(b["label"], dtype=torch.long)
-                          if not isinstance(b["label"], torch.Tensor) else b["label"]
-                          for b in batch], dim=0)
+
+    # single-label: LongTensor[B]
+    labels = torch.stack(
+        [
+            torch.as_tensor(b["label"], dtype=torch.long)
+            if not isinstance(b["label"], torch.Tensor) else b["label"].to(torch.long)
+            for b in batch
+        ],
+        dim=0
+    )
+
+    # multi-label : FloatTensor[B, 2] — добавляем ТОЛЬКО если у всех элементов он есть
+    has_ml = all(("label_ml" in b) and (b["label_ml"] is not None) for b in batch)
+    if has_ml:
+        labels_ml = torch.stack(
+            [
+                torch.as_tensor(b["label_ml"], dtype=torch.float32)
+                if not isinstance(b["label_ml"], torch.Tensor) else b["label_ml"].to(torch.float32)
+                for b in batch
+            ],
+            dim=0
+        )
+    else:
+        labels_ml = None
+
     # features оставляем как есть (dict), если тренеру нужно — он сам разберёт
     features = [b.get("features") for b in batch]
-    return {"video_paths": vpaths, "labels": labels, "names": names, "features": features}
+
+    out = {
+        "video_paths": vpaths,
+        "labels": labels,          # LongTensor[B]
+        "names": names,
+        "features": features,
+    }
+    if has_ml:
+        out["labels_ml"] = labels_ml  # FloatTensor[B, 2]
+
+    return out
 
 
 def make_wsm_dataset_and_loader(config, split: str) -> Tuple[ConcatDataset, DataLoader]:
@@ -48,8 +81,8 @@ def make_wsm_dataset_and_loader(config, split: str) -> Tuple[ConcatDataset, Data
             video_dir=video_dir,
             config=config,
             split=split,
-            modality_processors=getattr(config, "modality_processors"),        # кладём заранее в config в main.py
-            modality_feature_extractors=getattr(config, "modality_extractors"),# то же самое
+            modality_processors=getattr(config, "modality_processors"),         # кладём заранее в config в main.py
+            modality_feature_extractors=getattr(config, "modality_extractors"), # то же самое
             dataset_name=ds_name,
             device=getattr(config, "device", "cuda"),
         )

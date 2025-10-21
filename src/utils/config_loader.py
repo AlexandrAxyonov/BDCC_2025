@@ -61,6 +61,10 @@ class ConfigLoader:
 
         # общее
         self.model_name = train_model.get("model_name", "mamba")  # "mamba" или "transformer"
+        self.multi_label = train_model.get("multi_label", False)
+        self.thr_dep = train_model.get("thr_dep", 0.5)  # "mamba" или "transformer"
+        self.thr_park = train_model.get("thr_park", 0.5)  # "mamba" или "transformer"
+
         self.model_name = train_model.get("model_name", "mamba")
         self.hidden_dim = train_model.get("hidden_dim", 256)
         self.dropout = train_model.get("dropout", 0.15)

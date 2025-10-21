@@ -86,6 +86,7 @@ class ClipVideoExtractor:
                 face_tensor: Optional[torch.Tensor] = None,
                 images: Optional[Union[np.ndarray, list]] = None,
                 **_) -> Dict[str, torch.Tensor]:
+
         # Normalize input → pixel_values [T,3,H,W]
         if pixel_values is None:
             if images is not None:
