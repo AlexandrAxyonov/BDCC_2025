@@ -9,6 +9,7 @@ from lion_pytorch import Lion
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
@@ -37,57 +38,106 @@ def seed_everything(seed: int):
 
 def _stack_body_features(
     features_list: List[Optional[dict]],
-    average_mode: str = "mean"
+    average_mode: str = "mean",
+    segment_length: Optional[int] = None,
 ):
     """
     batch["features"] — список:
       {"body": {"mean":[D]} | {"mean":[D],"std":[D]} | {"seq":[T,D]}}
-    Возвращаем X=[B,D’] и индексы сохранённых элементов.
+    Возвращает:
+      - при raw: X=[B, segment_length, D] (T паддится/обрезается до segment_length)
+      - иначе:   X=[B,D’]
     """
     rows: List[torch.Tensor] = []
     keep_idx: List[int] = []
+    lengths: List[int] = []  # реальные длины до паддинга
 
     for i, feats in enumerate(features_list):
         if not feats or "body" not in feats or feats["body"] is None:
             continue
         body = feats["body"]
+
         if average_mode == "mean_std" and "mean" in body and "std" in body:
-            x = torch.cat([body["mean"].view(-1), body["std"].view(-1)], dim=0).to(torch.float32).cpu()
-        elif "mean" in body:
-            x = body["mean"].view(-1).to(torch.float32).cpu()
+            x = torch.cat([body["mean"].view(-1), body["std"].view(-1)], dim=0).to(torch.float32)
+
+        elif average_mode == "mean" and "mean" in body:
+            x = body["mean"].view(-1).to(torch.float32)
+
+        elif average_mode == "raw" and "seq" in body:
+            s = body["seq"].to(torch.float32)  # [T, D]
+            # ограничиваем длину сверху
+            if segment_length is not None and s.size(0) > segment_length:
+                s = s[:segment_length]
+            # rows.append(s)
+            rows.append(s.cpu())
+            lengths.append(s.size(0))
+            keep_idx.append(i)
+            continue
+
         elif "seq" in body:
-            s = body["seq"]  # [T,D]
-            x = s.mean(dim=0).to(torch.float32).cpu()
+            s = body["seq"]
+            x = s.mean(dim=0).to(torch.float32)
+
         else:
             continue
-        rows.append(x)
+
+        rows.append(x.cpu())
         keep_idx.append(i)
 
     if not rows:
         raise RuntimeError("В батче нет пригодных body-фич. Проверь кэш и average_features.")
-    X = torch.stack(rows, dim=0)  # [B,D’]
-    return X, keep_idx
 
+    # ───────────────────────────── RAW MODE ─────────────────────────────
+    if average_mode == "raw" and rows[0].ndim == 2:
+        # паддим последовательности до одинаковой длины
+        X = pad_sequence(rows, batch_first=True, padding_value=0.0)  # [B, T_max, D]
+
+        # если T_max < segment_length — добиваем до ровно segment_length
+        if segment_length is not None and X.size(1) < segment_length:
+            pad = torch.zeros(
+                X.size(0),
+                segment_length - X.size(1),
+                X.size(2),
+                dtype=X.dtype,
+                device=X.device
+            )
+            X = torch.cat([X, pad], dim=1)
+
+        # гарантируем фиксированный размер [B, segment_length, D]
+        if segment_length is not None:
+            X = X[:, :segment_length, :]
+
+        mask = torch.zeros(X.size(0), X.size(1), dtype=torch.bool)
+        for i, L in enumerate(lengths):
+            mask[i, :min(L, X.size(1))] = True
+
+    else:
+        # mean / mean_std → [B, D’]
+        X = torch.stack(rows, dim=0)
+        mask = None
+
+    return X, keep_idx, mask
 
 def _filter_labels(labels: torch.Tensor, keep_idx: List[int]) -> torch.Tensor:
     return labels[keep_idx]
 
 
-def _gather_all_labels(loader: DataLoader, average_mode: str) -> np.ndarray:
+def _gather_all_labels(loader: DataLoader, average_mode: str, segment_length: Optional[int] = None) -> np.ndarray:
+
     ys = []
     for batch in loader:
         if batch is None:
             continue
-        _, keep = _stack_body_features(batch["features"], average_mode)
+        _, keep, _ = _stack_body_features(batch["features"], average_mode, segment_length=segment_length)
+
         y = _filter_labels(batch["labels"], keep)
         ys.append(y.cpu().numpy())
     if not ys:
         raise RuntimeError("Не удалось собрать метки с train-лоадера.")
     return np.concatenate(ys, axis=0)
 
-
-def _num_classes_from_loader(loader: DataLoader, average_mode: str) -> int:
-    y = _gather_all_labels(loader, average_mode)
+def _num_classes_from_loader(loader: DataLoader, average_mode: str, segment_length: Optional[int] = None) -> int:
+    y = _gather_all_labels(loader, average_mode, segment_length=segment_length)
     return int(np.max(y) + 1)
 
 
@@ -138,7 +188,7 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
 
 # ───────────────────── multi-label helpers ─────────────────────
 
-def _gather_pos_weight_for_ml(loader: DataLoader, average_mode: str) -> torch.Tensor:
+def _gather_pos_weight_for_ml(loader: DataLoader, average_mode: str, segment_length: Optional[int] = None) -> torch.Tensor:
     """
     Считает pos_weight для BCE по двум головам: N_neg/N_pos на трейне.
     Ожидает, что в батче есть 'labels_ml': FloatTensor[B,2].
@@ -148,7 +198,7 @@ def _gather_pos_weight_for_ml(loader: DataLoader, average_mode: str) -> torch.Te
     for batch in loader:
         if batch is None or "labels_ml" not in batch:
             continue
-        _, keep = _stack_body_features(batch["features"], average_mode)
+        _, keep, _ = _stack_body_features(batch["features"], average_mode, segment_length=segment_length)
         y_ml = batch["labels_ml"][keep]  # [b,2]
         pos += y_ml.double().sum(dim=0)
         neg += (1.0 - y_ml.double()).sum(dim=0)
@@ -185,9 +235,10 @@ def _map_probs_to_single_label(p_dep: np.ndarray, p_park: np.ndarray,
 
 @torch.no_grad()
 def _eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device,
-                avg_mode: str, metrics_num_classes: int,
-                multi_label: bool = False,
-                thr_dep: float = 0.5, thr_park: float = 0.5) -> Dict[str, float]:
+            avg_mode: str, metrics_num_classes: int,
+            multi_label: bool = False,
+            thr_dep: float = 0.5, thr_park: float = 0.5,
+            segment_length: Optional[int] = None) -> Dict[str, float]:
     """
     metrics_num_classes:
       - single-label: 3 (control/depression/parkinson)
@@ -200,12 +251,19 @@ def _eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device,
         if batch is None:
             continue
 
-        X, keep = _stack_body_features(batch["features"], avg_mode)  # [B,D’]
-        y = _filter_labels(batch["labels"], keep).to(device)         # [B]
+        # X, keep = _stack_body_features(batch["features"], avg_mode, segment_length=segment_length)
+        X, keep, mask = _stack_body_features(batch["features"], avg_mode, segment_length=segment_length)
+
+
+        y = _filter_labels(batch["labels"], keep).to(device)
         if X.ndim == 2:
             X = X.unsqueeze(1)  # → [B,1,D’]
 
-        logits = model(X.to(device))  # [B,C]
+        # logits = model(X.to(device))  # [B,C]
+        logits = model(
+            X.to(device, non_blocking=True),
+            mask=mask.to(device, non_blocking=True) if mask is not None else None
+        )
         if not multi_label:
             pred = logits.argmax(dim=1)
         else:
@@ -265,7 +323,7 @@ def train(
     avg_mode = cfg.average_features.lower()
     multi_label = bool(getattr(cfg, "multi_label", False))
 
-    # первый батч → определяем D’ (и фиктивную длину 1, т.к. уже спулили до вектора)
+
     first = None
     for b in mm_loader:
         if b is not None:
@@ -273,9 +331,15 @@ def train(
             break
     if first is None:
         raise RuntimeError("train loader пустой (или collate всё фильтрует).")
-    X0, _ = _stack_body_features(first["features"], avg_mode)  # [B0, D’]
-    in_dim = int(X0.shape[1])
-    seq_len = 1
+    X0, _, _ = _stack_body_features(first["features"], avg_mode, segment_length=cfg.segment_length)
+
+    if X0.ndim == 3:   # raw: [B0, T, D]
+        in_dim  = int(X0.shape[2])
+        seq_len = int(X0.shape[1])  # == cfg.segment_length
+    else:               # mean / mean_std: [B0, D]
+        in_dim  = int(X0.shape[1])
+        seq_len = 1
+
 
     # число выходов модели и число классов для метрик
     # model_num_classes: 3 (single) / 2 (multi)
@@ -287,7 +351,7 @@ def train(
         try:
             model_num_classes = cfg.num_classes
         except AttributeError:
-            model_num_classes = _num_classes_from_loader(mm_loader, avg_mode)
+            model_num_classes = _num_classes_from_loader(mm_loader, avg_mode, segment_length=cfg.segment_length)
         metrics_num_classes = model_num_classes
 
     # ─── class weights / pos_weight ─────────────────────────────────────
@@ -296,14 +360,14 @@ def train(
             ce_weights = None
             logging.info("⚖️ Class weighting: none (веса отключены)")
         else:
-            y_all = _gather_all_labels(mm_loader, avg_mode)
+            y_all = _gather_all_labels(mm_loader, avg_mode, segment_length=cfg.segment_length)
             classes = np.arange(model_num_classes)
             class_weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_all)
             ce_weights = torch.tensor(class_weights, dtype=torch.float32, device=device)
             logging.info(f"⚖️ Class weighting: balanced → {class_weights.tolist()}")
     else:
         # pos_weight для BCE по двум головам
-        pos_weight = _gather_pos_weight_for_ml(mm_loader, avg_mode).to(device)
+        pos_weight = _gather_pos_weight_for_ml(mm_loader, avg_mode, segment_length=cfg.segment_length).to(device)
         logging.info(f"⚖️ pos_weight (BCE) → {pos_weight.cpu().numpy().tolist()}")
 
     # модель/опт/лосс
@@ -355,10 +419,12 @@ def train(
         tot_loss, tot_n = 0.0, 0
         tr_y, tr_p = [], []
 
-        for batch in tqdm(mm_loader, desc="Train"):
+        for batch_idx, batch in enumerate(tqdm(mm_loader, desc="Train")):
             if batch is None:
                 continue
-            X, keep = _stack_body_features(batch["features"], avg_mode)  # [B,D’]
+            # X, keep = _stack_body_features(batch["features"], avg_mode, segment_length=cfg.segment_length)
+            X, keep, mask = _stack_body_features(batch["features"], avg_mode, segment_length=cfg.segment_length)
+
 
             # таргеты
             if not multi_label:
@@ -370,8 +436,30 @@ def train(
 
             if X.ndim == 2:
                 X = X.unsqueeze(1)  # [B,1,D’]
-            logits = model(X.to(device))  # [b,C]
+
+            # logits = model(X.to(device))  # [b,C]
+            logits = model(
+                X.to(device, non_blocking=True),
+                mask=mask.to(device, non_blocking=True) if mask is not None else None
+            )
+
             loss = criterion(logits, y)
+
+            # if multi_label and epoch == 0 and batch_idx == 0:
+            #     print("── DEBUG MULTILABEL ──")
+            #     print("LOGITS:\n", logits[:5].detach().cpu().numpy())
+            #     probs = torch.sigmoid(logits)
+            #     print("PROBS (after sigmoid):\n", probs[:5].detach().cpu().numpy())
+            #     y_hat = _map_probs_to_single_label(
+            #         probs[:, 0].detach().cpu().numpy(),
+            #         probs[:, 1].detach().cpu().numpy(),
+            #         t_dep=getattr(cfg, "thr_dep", 0.5),
+            #         t_park=getattr(cfg, "thr_park", 0.5)
+            #     )
+            #     print("PREDICTED CLASSES (mapped 0/1/2):", y_hat[:10])
+            #     print("TRUE LABELS (original):", _filter_labels(batch["labels"], keep)[:10].cpu().numpy())
+            #     print("────────────────────────────")
+
 
             loss.backward()
             optimizer.step()
@@ -419,12 +507,14 @@ def train(
         cur_dev = {}
         if dev_loaders:
             for name, ldr in dev_loaders.items():
+
                 md = _eval_epoch(
                     model, ldr, device, avg_mode,
                     metrics_num_classes,
                     multi_label=multi_label,
-                    thr_dep=getattr(cfg, "thr_dep", 0.5),
-                    thr_park=getattr(cfg, "thr_park", 0.5),
+                    thr_dep=getattr(cfg,"thr_dep",0.5),
+                    thr_park=getattr(cfg,"thr_park",0.5),
+                    segment_length=cfg.segment_length,
                 )
                 if md:
                     cur_dev.update({f"{k}_{name}": v for k, v in md.items()})
@@ -440,6 +530,7 @@ def train(
                     multi_label=multi_label,
                     thr_dep=getattr(cfg, "thr_dep", 0.5),
                     thr_park=getattr(cfg, "thr_park", 0.5),
+                    segment_length=cfg.segment_length,
                 )
                 if mt:
                     cur_test.update({f"{k}_{name}": v for k, v in mt.items()})

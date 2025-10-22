@@ -4,8 +4,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .help_layers import TransformerEncoderLayer, MambaBlock
 
+
 class VideoMamba(nn.Module):
-    def __init__(self, input_dim=512, hidden_dim=128, mamba_d_state=8, mamba_ker_size=3, mamba_layer_number=2, d_discr=None, dropout=0.1, seg_len=20, out_features=128, num_classes=7, device='cpu'):
+    def __init__(
+        self,
+        input_dim=512,
+        hidden_dim=128,
+        mamba_d_state=8,
+        mamba_ker_size=3,
+        mamba_layer_number=2,
+        d_discr=None,
+        dropout=0.1,
+        seg_len=20,
+        out_features=128,
+        num_classes=7,
+        device='cpu'
+    ):
         super(VideoMamba, self).__init__()
 
         mamba_par = {
@@ -43,34 +57,46 @@ class VideoMamba(nn.Module):
 
         self._init_weights()
 
-    def forward(self, sequences, features=False):
-        sequences = self.image_proj(sequences)
+    def forward(self, sequences, mask=None, features=False):
+        """
+        sequences: [B, T, D_in]
+        mask:      [B, T] (bool) — True для реальных кадров, False — паддинг
+        """
+        sequences = self.image_proj(sequences)  # [B, T, hidden_dim]
 
+        # основной проход через Mamba-блоки (без явной маски, если её не поддерживает блок)
         for i in range(len(self.mamba)):
             att_sequences, _ = self.mamba[i](sequences)
             sequences = sequences + att_sequences
 
-        sequences_poll = self._pool_features(sequences)
-
-        out = self.classifier(sequences_poll)
+        # усредняем ТОЛЬКО по реальным кадрам
+        sequences_pool = self._pool_features(sequences, mask)  # [B, hidden_dim]
+        out = self.classifier(sequences_pool)
 
         if features:
-            return {'prob': out,
-                    'features': sequences_poll}
+            return {'prob': out, 'features': sequences_pool}
         else:
             return out
 
     def _calculate_classifier_input_dim(self):
         """Calculates input feature size for classifier"""
-        # Test pass through pooling with dummy data
         dummy_video = torch.randn(1, self.seg_len, self.hidden_dim)
-
-        video_pool = self._pool_features(dummy_video)
-
+        video_pool = self._pool_features(dummy_video, mask=None)
         self.classifier_input_dim = video_pool.size(1)
 
-    def _pool_features(self, x):
-        mean_temp = x.mean(dim=1)  # [batch, hidden_dim]
+    def _pool_features(self, sequences, mask=None):
+        """
+        sequences: [B, T, H]
+        mask: [B, T] (bool)
+        """
+        if mask is None:
+            mean_temp = sequences.mean(dim=1)  # [B, H]
+            return mean_temp
+
+        # masked mean: sum(valid) / count(valid)
+        denom = mask.sum(dim=1).clamp(min=1).unsqueeze(-1).to(sequences.dtype)  # [B,1]
+        sequences_masked = sequences.masked_fill(~mask.unsqueeze(-1), 0.0)
+        mean_temp = sequences_masked.sum(dim=1) / denom  # [B, H]
         return mean_temp
 
     def _init_weights(self):
@@ -83,9 +109,20 @@ class VideoMamba(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+
 class VideoFormer(nn.Module):
-    def __init__(self, input_dim=512, hidden_dim=128,
-                num_transformer_heads=2, positional_encoding=True, dropout=0.1, tr_layer_number=2, seg_len=20, out_features=128, num_classes=7):
+    def __init__(
+        self,
+        input_dim=512,
+        hidden_dim=128,
+        num_transformer_heads=2,
+        positional_encoding=True,
+        dropout=0.1,
+        tr_layer_number=2,
+        seg_len=20,
+        out_features=128,
+        num_classes=7
+    ):
         super(VideoFormer, self).__init__()
 
         self.seg_len = seg_len
@@ -118,28 +155,38 @@ class VideoFormer(nn.Module):
 
         self._init_weights()
 
-    def forward(self, sequences):
-        sequences = self.image_proj(sequences)
+    def forward(self, sequences, mask=None):
+        """
+        sequences: [B, T, D_in]
+        mask:      [B, T] (bool) — True для реальных кадров, False — паддинг
+        """
+        sequences = self.image_proj(sequences)  # [B, T, hidden_dim]
 
         for i in range(len(self.transformer)):
-            att_sequences = self.transformer[i](sequences, sequences, sequences)
+            # пробуем передать маску, если слой её поддерживает
+            try:
+                att_sequences = self.transformer[i](sequences, sequences, sequences, key_padding_mask=mask)
+            except TypeError:
+                att_sequences = self.transformer[i](sequences, sequences, sequences)
             sequences = sequences + att_sequences
 
-        sequences_poll = self._pool_features(sequences)
-
-        return self.classifier(sequences_poll)
+        sequences_pool = self._pool_features(sequences, mask)  # masked mean
+        return self.classifier(sequences_pool)
 
     def _calculate_classifier_input_dim(self):
         """Calculates input feature size for classifier"""
-        # Test pass through pooling with dummy data
         dummy_video = torch.randn(1, self.seg_len, self.hidden_dim)
-
-        video_pool = self._pool_features(dummy_video)
-
+        video_pool = self._pool_features(dummy_video, mask=None)
         self.classifier_input_dim = video_pool.size(1)
 
-    def _pool_features(self, x):
-        mean_temp = x.mean(dim=1)  # [batch, hidden_dim]
+    def _pool_features(self, sequences, mask=None):
+        if mask is None:
+            mean_temp = sequences.mean(dim=1)  # [B, H]
+            return mean_temp
+
+        denom = mask.sum(dim=1).clamp(min=1).unsqueeze(-1).to(sequences.dtype)  # [B,1]
+        sequences_masked = sequences.masked_fill(~mask.unsqueeze(-1), 0.0)
+        mean_temp = sequences_masked.sum(dim=1) / denom  # [B, H]
         return mean_temp
 
     def _init_weights(self):

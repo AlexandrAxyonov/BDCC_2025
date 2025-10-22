@@ -33,7 +33,7 @@ random_seed = 42                  # фиксируем random seed для вос
 subset_size = 0                  # ограничение на количество примеров (0 = использовать весь датасет)
 batch_size = 32                   # размер батча
 num_epochs = 100                   # число эпох тренировки
-max_patience = 15                 # максимальное число эпох без улучшений (для Early Stopping)
+max_patience = 10                 # максимальное число эпох без улучшений (для Early Stopping)
 save_best_model = true            # сохранять лучшую модель
 save_prepared_data = true         # сохранять извлеченные признаки (эмбеддинги)
 save_feature_path = './features/' # путь для сохранения эмбеддингов
@@ -51,7 +51,7 @@ class_weighting = "balanced" # "none"
 [train.model]
 # какую модель используем: "mamba" или "transformer"
 model_name            = "mamba"
-multi_label = true
+multi_label = false
 thr_dep = 0.5
 thr_park = 0.5
 
