@@ -41,16 +41,13 @@ def _stack_body_features(
     average_mode: str = "mean",
     segment_length: Optional[int] = None,
 ):
-    """
-    batch["features"] — список:
-      {"body": {"mean":[D]} | {"mean":[D],"std":[D]} | {"seq":[T,D]}}
-    Возвращает:
-      - при raw: X=[B, segment_length, D] (T паддится/обрезается до segment_length)
-      - иначе:   X=[B,D’]
-    """
+
+    if average_mode not in {"mean", "mean_std", "raw"}:
+        raise ValueError(f"unknown average_mode={average_mode!r} (expected 'mean'|'mean_std'|'raw')")
+
     rows: List[torch.Tensor] = []
     keep_idx: List[int] = []
-    lengths: List[int] = []  # реальные длины до паддинга
+    lengths: List[int] = []  # реальные длины (для маски в raw)
 
     for i, feats in enumerate(features_list):
         if not feats or "body" not in feats or feats["body"] is None:
@@ -59,64 +56,47 @@ def _stack_body_features(
 
         if average_mode == "mean_std" and "mean" in body and "std" in body:
             x = torch.cat([body["mean"].view(-1), body["std"].view(-1)], dim=0).to(torch.float32)
+            rows.append(x)
+            keep_idx.append(i)
 
         elif average_mode == "mean" and "mean" in body:
             x = body["mean"].view(-1).to(torch.float32)
+            rows.append(x)
+            keep_idx.append(i)
 
         elif average_mode == "raw" and "seq" in body:
             s = body["seq"].to(torch.float32)  # [T, D]
-            # ограничиваем длину сверху
-            if segment_length is not None and s.size(0) > segment_length:
-                s = s[:segment_length]
-            # rows.append(s)
-            rows.append(s.cpu())
+            rows.append(s)
             lengths.append(s.size(0))
             keep_idx.append(i)
-            continue
-
-        elif "seq" in body:
-            s = body["seq"]
-            x = s.mean(dim=0).to(torch.float32)
 
         else:
             continue
 
-        rows.append(x.cpu())
-        keep_idx.append(i)
-
     if not rows:
         raise RuntimeError("В батче нет пригодных body-фич. Проверь кэш и average_features.")
 
-    # ───────────────────────────── RAW MODE ─────────────────────────────
-    if average_mode == "raw" and rows[0].ndim == 2:
-        # паддим последовательности до одинаковой длины
+    if average_mode == "raw":
+        # 1) выравниваем по T_max внутри батча
         X = pad_sequence(rows, batch_first=True, padding_value=0.0)  # [B, T_max, D]
 
-        # если T_max < segment_length — добиваем до ровно segment_length
-        if segment_length is not None and X.size(1) < segment_length:
-            pad = torch.zeros(
-                X.size(0),
-                segment_length - X.size(1),
-                X.size(2),
-                dtype=X.dtype,
-                device=X.device
-            )
-            X = torch.cat([X, pad], dim=1)
-
-        # гарантируем фиксированный размер [B, segment_length, D]
-        if segment_length is not None:
-            X = X[:, :segment_length, :]
-
-        mask = torch.zeros(X.size(0), X.size(1), dtype=torch.bool)
-        for i, L in enumerate(lengths):
-            mask[i, :min(L, X.size(1))] = True
+        # 3) маска валидных таймстепов
+        T = X.size(1)
+        mask = torch.zeros(X.size(0), T, dtype=torch.bool, device=X.device)
+        if lengths:
+            for bi, L in enumerate(lengths):
+                mask[bi, :min(L, T)] = True
+        else:
+            # на всякий случай (должно не происходить)
+            mask[:] = True
 
     else:
-        # mean / mean_std → [B, D’]
+        # mean / mean_std → [B, D’], маска не нужна
         X = torch.stack(rows, dim=0)
         mask = None
 
     return X, keep_idx, mask
+
 
 def _filter_labels(labels: torch.Tensor, keep_idx: List[int]) -> torch.Tensor:
     return labels[keep_idx]
@@ -390,6 +370,7 @@ def train(
 
     # ─── Scheduler ────────────────────────────────────────────────────
     steps_per_epoch = sum(1 for b in mm_loader if b is not None)
+    # steps_per_epoch = len(mm_loader)
     scheduler = SmartScheduler(
         scheduler_type=cfg.scheduler_type,
         optimizer=optimizer,
@@ -401,6 +382,8 @@ def train(
     if not multi_label:
         # criterion = nn.CrossEntropyLoss(weight=(ce_weights if 'ce_weights' in locals() else None))
         criterion = nn.CrossEntropyLoss(weight=ce_weights)
+        # criterion = nn.CrossEntropyLoss(weight=ce_weights, label_smoothing=0.05)
+
 
     else:
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -444,22 +427,6 @@ def train(
             )
 
             loss = criterion(logits, y)
-
-            # if multi_label and epoch == 0 and batch_idx == 0:
-            #     print("── DEBUG MULTILABEL ──")
-            #     print("LOGITS:\n", logits[:5].detach().cpu().numpy())
-            #     probs = torch.sigmoid(logits)
-            #     print("PROBS (after sigmoid):\n", probs[:5].detach().cpu().numpy())
-            #     y_hat = _map_probs_to_single_label(
-            #         probs[:, 0].detach().cpu().numpy(),
-            #         probs[:, 1].detach().cpu().numpy(),
-            #         t_dep=getattr(cfg, "thr_dep", 0.5),
-            #         t_park=getattr(cfg, "thr_park", 0.5)
-            #     )
-            #     print("PREDICTED CLASSES (mapped 0/1/2):", y_hat[:10])
-            #     print("TRUE LABELS (original):", _filter_labels(batch["labels"], keep)[:10].cpu().numpy())
-            #     print("────────────────────────────")
-
 
             loss.backward()
             optimizer.step()

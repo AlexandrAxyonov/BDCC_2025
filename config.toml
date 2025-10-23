@@ -32,7 +32,7 @@ prepare_only = false      # только извлечение признаков
 random_seed = 42                  # фиксируем random seed для воспроизводимости (0 = каждый раз разный)
 subset_size = 0                  # ограничение на количество примеров (0 = использовать весь датасет)
 batch_size = 32                   # размер батча
-num_epochs = 100                   # число эпох тренировки
+num_epochs = 50                   # число эпох тренировки
 max_patience = 10                 # максимальное число эпох без улучшений (для Early Stopping)
 save_best_model = true            # сохранять лучшую модель
 save_prepared_data = true         # сохранять извлеченные признаки (эмбеддинги)
@@ -50,14 +50,14 @@ class_weighting = "balanced" # "none"
 # ---------------------------
 [train.model]
 # какую модель используем: "mamba" или "transformer"
-model_name            = "mamba"
+model_name            = "transformer"
 multi_label = false
 thr_dep = 0.5
 thr_park = 0.5
 
 hidden_dim            = 128      # размер скрытого состояния
 out_features          = 512      # размер финальных признаков перед классификацией
-dropout               = 0.2      # dropout между слоями
+dropout               = 0.25     # dropout между слоями
 
 # ---- параметры для VideoFormer ----
 num_transformer_heads = 8        # количество attention голов в трансформере
@@ -75,15 +75,15 @@ mamba_layers          = 5        # число mamba-блоков
 # ---------------------------
 [train.optimizer]
 optimizer = "adamw"        # тип оптимизатора: "adam", "adamw", "lion", "sgd", "rmsprop"
-lr = 1e-4                 # начальная скорость обучения
-weight_decay = 0.0        # weight decay для регуляризации
+lr = 1e-5                 # начальная скорость обучения
+weight_decay = 1e-4         # weight decay для регуляризации
 momentum = 0.9            # momentum (используется только в SGD)
 
 # ---------------------------
 # Параметры шедулера
 # ---------------------------
 [train.scheduler]
-scheduler_type = "plateau" # тип шедулера: "none", "plateau", "cosine", "onecycle" ил  и HuggingFace-стиль ("huggingface_linear", "huggingface_cosine" "huggingface_cosine_with_restarts" и т.д.)
+scheduler_type = "none" # тип шедулера: "none", "plateau", "cosine", "onecycle" ил  и HuggingFace-стиль ("huggingface_linear", "huggingface_cosine" "huggingface_cosine_with_restarts" и т.д.)
 warmup_ratio = 0.1         # отношение количества warmup-итераций к общему числу шагов (0.1 = 10%)
 
 [embeddings]
@@ -99,7 +99,7 @@ video_output_mode = "frame-cls"
 video_extractor = "openai/clip-vit-base-patch32" # google/vit-base-patch16-224 или "openai/clip-vit-base-patch32 " или google/vit-base-patch16-224-in21k
 yolo_weights = "./src/data_loading/best_YOLO.pt"
 video_mode = "stable" # "stable" (track) | "fast" (predict)
-segment_length = 60  # сколько кадров отобрать из всех возможных с равномерным шагом
+segment_length = 90  # сколько кадров отобрать из всех возможных с равномерным шагом
 emb_normalize = false
 
 [cache]
