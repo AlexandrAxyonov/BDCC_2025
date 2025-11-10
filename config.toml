@@ -99,7 +99,7 @@ video_output_mode = "frame-cls"
 video_extractor = "openai/clip-vit-base-patch32" # google/vit-base-patch16-224 или "openai/clip-vit-base-patch32 " или google/vit-base-patch16-224-in21k
 yolo_weights = "./src/data_loading/best_YOLO.pt"
 video_mode = "stable" # "stable" (track) | "fast" (predict)
-segment_length = 90  # сколько кадров отобрать из всех возможных с равномерным шагом
+segment_length = 60  # сколько кадров отобрать из всех возможных с равномерным шагом
 emb_normalize = false
 
 [cache]

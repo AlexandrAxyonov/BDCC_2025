@@ -162,16 +162,25 @@ class VideoFormer(nn.Module):
         """
         sequences = self.image_proj(sequences)  # [B, T, hidden_dim]
 
-        for i in range(len(self.transformer)):
-            # пробуем передать маску, если слой её поддерживает
-            try:
-                att_sequences = self.transformer[i](sequences, sequences, sequences, key_padding_mask=mask)
-            except TypeError:
-                att_sequences = self.transformer[i](sequences, sequences, sequences)
-            sequences = sequences + att_sequences
+        m = min(sequences.size(1), 64)
+        idx = torch.linspace(0, sequences.size(1) - 1, steps=m).round().long().to(sequences.device)
+        ctx = sequences.index_select(1, idx)  # [B, m, D]
+        ctx_mask = mask.index_select(1, idx) if mask is not None else None
 
-        sequences_pool = self._pool_features(sequences, mask)  # masked mean
-        return self.classifier(sequences_pool)
+        # 2) cross-attention блоки: Q = sequences, K=V=ctx
+        for i in range(len(self.transformer)):
+            att = self.transformer[i](
+                sequences,   # Q
+                ctx,         # K
+                ctx,         # V
+                key_padding_mask=(~ctx_mask) if ctx_mask is not None else None
+            )
+            sequences = sequences + att  # residual
+
+        # 3) как и раньше: masked mean pooling + классификатор
+        sequences_pool = self._pool_features(sequences, mask)
+        output = self.classifier(sequences_pool)
+        return output
 
     def _calculate_classifier_input_dim(self):
         """Calculates input feature size for classifier"""

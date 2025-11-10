@@ -66,21 +66,24 @@ class TransformerEncoderLayer(nn.Module):
         self.add_norm_after_ff = AddAndNorm(input_dim, dropout=dropout)
         self.positional_encoding = PositionalEncoding(input_dim) if positional_encoding else None
 
-    def forward(self, query, key, value):
+    # def forward(self, query, key, value):
+    def forward(self, query, key, value, *, key_padding_mask=None, attn_mask=None):
         if self.positional_encoding:
             key = self.positional_encoding(key)
             value = self.positional_encoding(value)
             query = self.positional_encoding(query)
 
-        attn_output, _ = self.self_attention(query, key, value, need_weights=False)
-        # attn_output = self.self_attention(query, key, value)
+        attn_output, _ = self.self_attention(
+            query, key, value,
+            key_padding_mask=key_padding_mask,
+            attn_mask=attn_mask,
+            need_weights=False
+        )
 
         x = self.add_norm_after_attention(attn_output, query)
-
         ff_output = self.feed_forward(x)
-        x = self.add_norm_after_ff(ff_output, x)
+        return self.add_norm_after_ff(ff_output, x)
 
-        return x
 
 class MambaBlock(nn.Module):
     def __init__(self, d_input, d_model, d_state=16, d_discr=None, ker_size=4, dropout=0., device='cuda'):
