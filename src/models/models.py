@@ -3,7 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .help_layers import TransformerEncoderLayer, MambaBlock
-
+from .attention.crossmpt.Model_CrossMPT import (
+    MultiHeadedAttention,
+    PositionwiseFeedForward,
+    Encoder,
+    EncoderLayer,
+)
 
 class VideoMamba(nn.Module):
     def __init__(
@@ -162,22 +167,17 @@ class VideoFormer(nn.Module):
         """
         sequences = self.image_proj(sequences)  # [B, T, hidden_dim]
 
-        m = min(sequences.size(1), 64)
-        idx = torch.linspace(0, sequences.size(1) - 1, steps=m).round().long().to(sequences.device)
-        ctx = sequences.index_select(1, idx)  # [B, m, D]
-        ctx_mask = mask.index_select(1, idx) if mask is not None else None
+        fixed_seq = sequences
 
-        # 2) cross-attention блоки: Q = sequences, K=V=ctx
         for i in range(len(self.transformer)):
             att = self.transformer[i](
                 sequences,   # Q
-                ctx,         # K
-                ctx,         # V
-                key_padding_mask=(~ctx_mask) if ctx_mask is not None else None
+                fixed_seq,         # K
+                fixed_seq,         # V
+                key_padding_mask=(~mask) if mask is not None else None
             )
             sequences = sequences + att  # residual
 
-        # 3) как и раньше: masked mean pooling + классификатор
         sequences_pool = self._pool_features(sequences, mask)
         output = self.classifier(sequences_pool)
         return output

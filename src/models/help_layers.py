@@ -86,7 +86,7 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class MambaBlock(nn.Module):
-    def __init__(self, d_input, d_model, d_state=16, d_discr=None, ker_size=4, dropout=0., device='cuda'):
+    def __init__(self, d_input, d_model, d_state=16, d_discr=None, ker_size=4, dropout=0.1, device='cuda'):
         super().__init__()
         d_discr = d_discr if d_discr is not None else d_model // 16
         self.in_proj  = nn.Linear(d_input, 2 * d_model, bias=False)
