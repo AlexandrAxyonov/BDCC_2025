@@ -2,6 +2,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import copy
+
 from .help_layers import TransformerEncoderLayer, MambaBlock
 from .attention.crossmpt.Model_CrossMPT import (
     MultiHeadedAttention,
@@ -9,6 +11,40 @@ from .attention.crossmpt.Model_CrossMPT import (
     Encoder,
     EncoderLayer,
 )
+
+class CrossMPTAttentionAdapter(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+        c = copy.deepcopy
+        attn = MultiHeadedAttention(num_heads, embed_dim)
+        ff = PositionwiseFeedForward(embed_dim, embed_dim * 4, dropout)
+        self.encoder = Encoder(EncoderLayer(embed_dim, c(attn), c(ff), dropout), 1)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        key_padding_mask: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
+        need_weights: bool = False,
+    ):
+        emb1, emb2 = self.encoder(query, key, None, None)   # [B, T, H], [B, T, H]
+        out = emb1  # для нашей задачи берём первый поток
+        return out, None
+
+class CrossMPTTransformerEncoderLayer(TransformerEncoderLayer):
+    """
+    Наследуемся от твоего слоя из help_layers и
+    подменяем только поле self_attention на наш адаптер.
+    Остальная логика (PE, Add&Norm, FFN) остаётся исходной.
+    """
+    def __init__(self, input_dim, num_heads, dropout=0.1, positional_encoding=False):
+        super().__init__(input_dim, num_heads, dropout=dropout, positional_encoding=positional_encoding)
+        # Меняем только «мозг» внимания:
+        self.self_attention = CrossMPTAttentionAdapter(input_dim, num_heads, dropout)
+
 
 class VideoMamba(nn.Module):
     def __init__(
@@ -74,7 +110,6 @@ class VideoMamba(nn.Module):
             att_sequences, _ = self.mamba[i](sequences)
             sequences = sequences + att_sequences
 
-        # усредняем ТОЛЬКО по реальным кадрам
         sequences_pool = self._pool_features(sequences, mask)  # [B, hidden_dim]
         out = self.classifier(sequences_pool)
 
@@ -141,6 +176,7 @@ class VideoFormer(nn.Module):
 
         self.transformer = nn.ModuleList([
             TransformerEncoderLayer(
+            # CrossMPTTransformerEncoderLayer(
                 input_dim=hidden_dim,
                 num_heads=num_transformer_heads,
                 dropout=dropout,
@@ -172,8 +208,8 @@ class VideoFormer(nn.Module):
         for i in range(len(self.transformer)):
             att = self.transformer[i](
                 sequences,   # Q
-                fixed_seq,         # K
-                fixed_seq,         # V
+                fixed_seq,   # K
+                fixed_seq,   # V
                 key_padding_mask=(~mask) if mask is not None else None
             )
             sequences = sequences + att  # residual
