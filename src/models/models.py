@@ -12,6 +12,8 @@ from .attention.crossmpt.Model_CrossMPT import (
     EncoderLayer,
 )
 
+from .layers.layers_2 import GraphAttentionLayer
+
 class CrossMPTAttentionAdapter(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.1):
         super().__init__()
@@ -174,6 +176,8 @@ class VideoFormer(nn.Module):
             nn.Dropout(dropout)
         )
 
+        # self.graph_layer = GraphAttentionLayer(hidden_dim, dropout=dropout)
+
         self.transformer = nn.ModuleList([
             TransformerEncoderLayer(
             # CrossMPTTransformerEncoderLayer(
@@ -203,16 +207,64 @@ class VideoFormer(nn.Module):
         """
         sequences = self.image_proj(sequences)  # [B, T, hidden_dim]
 
-        fixed_seq = sequences
 
+#-----------этот лучший'-------------------------------
+        # fixed_seq = sequences
+
+        # for i in range(len(self.transformer)):
+
+        #     att = self.transformer[i](
+        #         sequences,   # Q
+        #         fixed_seq,   # K
+        #         fixed_seq,   # V
+        #         key_padding_mask=(~mask) if mask is not None else None
+        #     )
+
+        #     sequences = sequences + att  # residual
+
+#--------------------------------------------------
+
+#------------hybrid 1---------------------------
+        # # ── слой 0: обычный self-attention ─────────────────────
+        # att0 = self.transformer[0](
+        #     sequences,   # Q
+        #     sequences,   # K
+        #     sequences,   # V
+        #     key_padding_mask=(~mask) if mask is not None else None
+        # )
+        # sequences = sequences + att0           # residual после 0-го слоя
+
+        # # фиксируем "память" ПОСЛЕ первого слоя
+        # fixed_seq = sequences
+
+        # # ── последующие слои: Q живой, K/V фиксированные ───────
+        # for i in range(1, len(self.transformer)):
+        #     att = self.transformer[i](
+        #         sequences,   # Q — текущее состояние
+        #         fixed_seq,   # K — фиксированная память
+        #         fixed_seq,   # V — фиксированная память
+        #         key_padding_mask=(~mask) if mask is not None else None
+        #     )
+        # sequences = sequences + att        # residual
+#--------------------------------------------------
+
+#-------------------альфа --------------------------
+        fixed_seq = sequences
         for i in range(len(self.transformer)):
+            alpha = 0.75
+            mixed = (1 - alpha) * sequences + alpha * fixed_seq
+
             att = self.transformer[i](
                 sequences,   # Q
-                fixed_seq,   # K
-                fixed_seq,   # V
+                mixed,       # K
+                mixed,       # V
                 key_padding_mask=(~mask) if mask is not None else None
             )
-            sequences = sequences + att  # residual
+            sequences = sequences + att
+
+#--------------------------------------------------
+
+
 
         sequences_pool = self._pool_features(sequences, mask)
         output = self.classifier(sequences_pool)
