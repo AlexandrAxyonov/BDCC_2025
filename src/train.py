@@ -15,7 +15,7 @@ from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import f1_score, recall_score
 
-from src.models.models import VideoMamba, VideoFormer
+from src.models.models import VideoFormer, VideoFormerMoE
 from src.utils.logger_setup import color_metric, color_split
 from src.utils.schedulers import SmartScheduler
 
@@ -136,19 +136,20 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
     model_name = cfg.model_name.lower()  # "mamba" | "transformer"
 
     if model_name in ("mamba", "vmamba", "video_mamba"):
-        model = VideoMamba(
-            input_dim=input_dim,
-            hidden_dim=cfg.hidden_dim,
-            mamba_d_state=cfg.mamba_d_state,
-            mamba_ker_size=cfg.mamba_ker_size,
-            mamba_layer_number=cfg.mamba_layers,
-            d_discr=getattr(cfg, "mamba_d_discr", None),
-            dropout=cfg.dropout,
-            seg_len=seq_len,
-            out_features=cfg.out_features,
-            num_classes=num_classes,
-            device=str(device)
-        )
+        # model = VideoMamba(
+        #     input_dim=input_dim,
+        #     hidden_dim=cfg.hidden_dim,
+        #     mamba_d_state=cfg.mamba_d_state,
+        #     mamba_ker_size=cfg.mamba_ker_size,
+        #     mamba_layer_number=cfg.mamba_layers,
+        #     d_discr=getattr(cfg, "mamba_d_discr", None),
+        #     dropout=cfg.dropout,
+        #     seg_len=seq_len,
+        #     out_features=cfg.out_features,
+        #     num_classes=num_classes,
+        #     device=str(device)
+        # )
+        print("Мамбы нет")
     elif model_name in ("transformer", "former", "videoformer", "tr"):
         model = VideoFormer(
             input_dim=input_dim,
@@ -159,8 +160,20 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
             tr_layer_number=cfg.tr_layers,
             seg_len=seq_len,
             out_features=cfg.out_features,
-            num_classes=num_classes
+            num_classes=num_classes,
+            gate_mode=cfg.gate_mode
         )
+        # model = VideoFormerMoE(
+        #     input_dim=input_dim,
+        #     hidden_dim=cfg.hidden_dim,
+        #     num_transformer_heads=cfg.num_transformer_heads,
+        #     positional_encoding=cfg.positional_encoding,
+        #     dropout=cfg.dropout,
+        #     tr_layer_number=cfg.tr_layers,
+        #     seg_len=seq_len,
+        #     out_features=cfg.out_features,
+        #     num_classes=num_classes,
+        # )
     else:
         raise ValueError(f"Неизвестная модель ='{cfg.model_name}'. Используй 'mamba' или 'transformer'.")
     return model.to(device)

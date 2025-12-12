@@ -3,7 +3,7 @@
 hidden_dim = [128]
 
 # num_transformer_heads = [2,4,8]
-# tr_layers = [2,3,4,5]
+# tr_layers = [5,10, 15]
 # # dropout = [0.1, 0.15, 0.2]
 # out_features = [128, 256, 512]
 # mamba_d_state         = [16,24]        # внутреннее состояние mamba

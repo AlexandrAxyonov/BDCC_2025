@@ -69,6 +69,7 @@ class ConfigLoader:
         self.hidden_dim = train_model.get("hidden_dim", 256)
         self.dropout = train_model.get("dropout", 0.15)
         self.out_features = train_model.get("out_features", 128)
+        self.gate_mode = train_model.get("gate_mode", "None")
 
         # transformer-специфика
         self.num_transformer_heads = train_model.get("num_transformer_heads", 8)

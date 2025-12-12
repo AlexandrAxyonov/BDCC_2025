@@ -58,6 +58,7 @@ thr_park = 0.5
 hidden_dim            = 128      # размер скрытого состояния
 out_features          = 512      # размер финальных признаков перед классификацией
 dropout               = 0.25     # dropout между слоями
+gate_mode             = "none"   # bt , bd , t , d
 
 # ---- параметры для VideoFormer ----
 num_transformer_heads = 8        # количество attention голов в трансформере
