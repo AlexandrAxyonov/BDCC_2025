@@ -53,6 +53,8 @@ class ConfigLoader:
         self.selection_metric = train_general.get("selection_metric", "mean_combo")
         self.add_similarity = train_general.get("add_similarity", True)
         self.class_weighting = train_general.get("class_weighting", "balanced")
+        self.num_prototypes_per_class = train_general.get("num_prototypes_per_class", 1)
+        self.prototype_alpha = train_general.get("prototype_alpha", 1)
 
         # ---------------------------
         # Тренировка: параметры модели

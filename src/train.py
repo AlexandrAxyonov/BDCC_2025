@@ -15,9 +15,10 @@ from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import f1_score, recall_score
 
-from src.models.models import VideoFormer, VideoFormerMoE
+from src.models.models import VideoFormer, VideoFormerMoE, VideoFormer_with_Prototypes
 from src.utils.logger_setup import color_metric, color_split
 from src.utils.schedulers import SmartScheduler
+from src.utils.losses import prototype_contrastive_loss
 
 CLASS_LABELS = {
     0: "control",
@@ -174,6 +175,21 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
         #     out_features=cfg.out_features,
         #     num_classes=num_classes,
         # )
+
+    elif model_name in ("prototypes"):
+        model = VideoFormer_with_Prototypes(
+            input_dim=input_dim,
+            hidden_dim=cfg.hidden_dim,
+            num_transformer_heads=cfg.num_transformer_heads,
+            positional_encoding=cfg.positional_encoding,
+            dropout=cfg.dropout,
+            tr_layer_number=cfg.tr_layers,
+            seg_len=seq_len,
+            out_features=cfg.out_features,
+            num_classes=num_classes,
+            num_prototypes_per_class=cfg.num_prototypes_per_class
+        )
+
     else:
         raise ValueError(f"Неизвестная модель ='{cfg.model_name}'. Используй 'mamba' или 'transformer'.")
     return model.to(device)
@@ -228,7 +244,7 @@ def _map_probs_to_single_label(p_dep: np.ndarray, p_park: np.ndarray,
 
 @torch.no_grad()
 def _eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device,
-            avg_mode: str, metrics_num_classes: int,
+            avg_mode: str, metrics_num_classes: int, model_name: str,
             multi_label: bool = False,
             thr_dep: float = 0.5, thr_park: float = 0.5,
             segment_length: Optional[int] = None) -> Dict[str, float]:
@@ -253,10 +269,16 @@ def _eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device,
             X = X.unsqueeze(1)  # → [B,1,D’]
 
         # logits = model(X.to(device))  # [B,C]
-        logits = model(
-            X.to(device, non_blocking=True),
-            mask=mask.to(device, non_blocking=True) if mask is not None else None
-        )
+        if model_name == 'prototypes':
+                logits, _, _, embeddings =  model(
+                    X.to(device, non_blocking=True),
+                    mask=mask.to(device, non_blocking=True) if mask is not None else None
+                )
+        else:
+            logits =  model(
+                X.to(device, non_blocking=True),
+                mask=mask.to(device, non_blocking=True) if mask is not None else None
+            )
         if not multi_label:
             pred = logits.argmax(dim=1)
         else:
@@ -434,12 +456,32 @@ def train(
                 X = X.unsqueeze(1)  # [B,1,D’]
 
             # logits = model(X.to(device))  # [b,C]
-            logits = model(
-                X.to(device, non_blocking=True),
-                mask=mask.to(device, non_blocking=True) if mask is not None else None
-            )
+            # logits = model(
+            #     X.to(device, non_blocking=True),
+            #     mask=mask.to(device, non_blocking=True) if mask is not None else None
+            # )
+
+            # loss = criterion(logits, y)
+            if cfg.model_name.lower() == 'prototypes':
+                logits, _, _, embeddings =  model(
+                    X.to(device, non_blocking=True),
+                    mask=mask.to(device, non_blocking=True) if mask is not None else None
+                )
+            else:
+                logits =  model(
+                    X.to(device, non_blocking=True),
+                    mask=mask.to(device, non_blocking=True) if mask is not None else None
+                )
 
             loss = criterion(logits, y)
+
+            if cfg.model_name.lower() == 'prototypes':
+                cont_loss = prototype_contrastive_loss(
+                    embeddings, y, model.prototypes,
+                    num_classes=model.num_classes, temperature=0.1
+                )
+                alpha = cfg.prototype_alpha  # можно настраивать
+                loss = loss + alpha * cont_loss
 
             loss.backward()
             optimizer.step()
@@ -491,6 +533,7 @@ def train(
                 md = _eval_epoch(
                     model, ldr, device, avg_mode,
                     metrics_num_classes,
+                    model_name = cfg.model_name.lower(),
                     multi_label=multi_label,
                     thr_dep=getattr(cfg,"thr_dep",0.5),
                     thr_park=getattr(cfg,"thr_park",0.5),
@@ -507,6 +550,7 @@ def train(
                 mt = _eval_epoch(
                     model, ldr, device, avg_mode,
                     metrics_num_classes,
+                    model_name = cfg.model_name.lower(),
                     multi_label=multi_label,
                     thr_dep=getattr(cfg, "thr_dep", 0.5),
                     thr_park=getattr(cfg, "thr_park", 0.5),

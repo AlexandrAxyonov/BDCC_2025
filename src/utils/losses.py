@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 class BellLoss(nn.Module):
     def __init__(self):
@@ -451,3 +451,40 @@ class MultiTaskLossWithNaN(nn.Module):
             loss = torch.tensor(0.0, requires_grad=True, device=device)
 
         return loss
+
+def prototype_contrastive_loss(embeddings, labels, prototypes, num_classes, temperature=0.1):
+    """
+    embeddings: [B, D]
+    labels: [B]
+    prototypes: [P, D] = [num_classes * n_proto, D]
+    """
+    device = embeddings.device
+    B, D = embeddings.shape
+    P = prototypes.shape[0]
+    n_proto = P // num_classes
+
+    # Нормализуем
+    emb_norm = F.normalize(embeddings, dim=1)           # [B, D]
+    proto_norm = F.normalize(prototypes, dim=1)         # [P, D]
+
+    # Cosine similarity matrix: [B, P]
+    sim = torch.matmul(emb_norm, proto_norm.t()) / temperature  # [B, P]
+
+    # Маска положительных пар: [B, P]
+    # Для каждого батч-элемента — прототипы его класса
+    labels_exp = labels.unsqueeze(1).expand(-1, n_proto)  # [B, n_proto]
+    proto_indices = torch.arange(n_proto, device=device).unsqueeze(0)  # [1, n_proto]
+    pos_proto_ids = labels_exp * n_proto + proto_indices  # [B, n_proto] — индексы прототипов класса y_i
+    pos_mask = torch.zeros_like(sim, dtype=torch.bool)    # [B, P]
+    pos_mask.scatter_(1, pos_proto_ids, True)             # отмечаем позитивы
+
+    # Числитель: сумма exp(sim) по позитивным прототипам
+    exp_sim = torch.exp(sim)
+    pos_sum = (exp_sim * pos_mask).sum(dim=1)             # [B]
+
+    # Знаменатель: сумма exp(sim) по всем прототипам
+    all_sum = exp_sim.sum(dim=1)                          # [B]
+
+    # Loss per sample
+    loss = -torch.log(pos_sum / all_sum + 1e-8)           # [B]
+    return loss.mean()

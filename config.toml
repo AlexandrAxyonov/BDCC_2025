@@ -44,13 +44,15 @@ device = "cuda"           # "cuda" или "cpu", куда грузить мод�
 selection_metric = "UAR"   # по какой метрике отслеживаем
 add_similarity = true     # считает косинусное сходство эмбеддингов модальностей (или эмбеддинга к некоторому «гайд-банку»/прототипам классов). Используется в MultiModalFusionModel
 class_weighting = "balanced" # "none"
+num_prototypes_per_class = 1
+prototype_alpha = 1
 
 # ---------------------------
 # Параметры модели
 # ---------------------------
 [train.model]
-# какую модель используем: "mamba" или "transformer"
-model_name            = "transformer"
+# какую модель используем: "mamba" или "transformer" prototypes
+model_name            = "prototypes"
 multi_label = false
 thr_dep = 0.5
 thr_park = 0.5
@@ -58,7 +60,7 @@ thr_park = 0.5
 hidden_dim            = 128      # размер скрытого состояния
 out_features          = 512      # размер финальных признаков перед классификацией
 dropout               = 0.25     # dropout между слоями
-gate_mode             = "d"   # bt , bd , t , d
+gate_mode             = "none"   #  t , d
 
 # ---- параметры для VideoFormer ----
 num_transformer_heads = 8        # количество attention голов в трансформере
