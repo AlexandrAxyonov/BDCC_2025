@@ -22,12 +22,14 @@ class VideoFormer(nn.Module):
     ):
         super(VideoFormer, self).__init__()
 
+        # нормализуем строковые варианты "none"
         if isinstance(gate_mode, str) and gate_mode.lower() in {"none", "", "null"}:
             gate_mode = None
 
         self.seg_len = seg_len
         self.hidden_dim = hidden_dim
         self.gate_mode = gate_mode
+        self.num_layers = tr_layer_number
 
         # Проекция входных фич в hidden_dim
         self.image_proj = nn.Sequential(
@@ -47,15 +49,45 @@ class VideoFormer(nn.Module):
             for _ in range(tr_layer_number)
         ])
 
-        # if self.gate_mode is not None:
-        #     self.time_gates = nn.ModuleList([
-        #         nn.Linear(hidden_dim, 1)          # [B, T, D] -> [B, T, 1]
-        #         for _ in range(tr_layer_number)
-        #     ])
-        #     self.feat_gates = nn.ModuleList([
-        #         nn.Linear(hidden_dim, hidden_dim) # [B, D] -> [B, D]
-        #         for _ in range(tr_layer_number)
-        #     ])
+        # ───────────────── gating-параметры ─────────────────
+        # 4 режима:
+        #   bt: B×T×1  (per-sample, per-time)
+        #   bd: B×1×D  (per-sample, per-feature)
+        #   t:  1×T×1  (global по батчу, по времени)
+        #   d:  1×1×D  (global по батчу, по фичам)
+        #
+        # Здесь храним ЛОГИТЫ, зависят только от слоя, не от данных.
+        if self.gate_mode is not None:
+            # bt: логиты по времени (как у t), но потом расширяем до B×T×1
+            self.bt_gates = nn.ParameterList([
+                nn.Parameter(torch.zeros(self.seg_len, 1))   # [T, 1]
+                for _ in range(tr_layer_number)
+            ])
+
+            # bd: логиты по фичам (как у d), но потом расширяем до B×1×D
+            self.bd_gates = nn.ParameterList([
+                nn.Parameter(torch.zeros(hidden_dim))        # [D]
+                for _ in range(tr_layer_number)
+            ])
+
+            # t: глобальные логиты по времени (как прежде)
+            self.t_gates = nn.ParameterList([
+                nn.Parameter(torch.zeros(self.seg_len, 1))   # [T, 1]
+                for _ in range(tr_layer_number)
+            ])
+
+            # d: глобальные логиты по фичам (как прежде)
+            self.d_gates = nn.ParameterList([
+                nn.Parameter(torch.zeros(hidden_dim))        # [D]
+                for _ in range(tr_layer_number)
+            ])
+
+            # можно слегка возбудить логиты по времени, а фичи оставить нулями
+            for p in self.bt_gates:
+                nn.init.xavier_uniform_(p)      # [T,1]
+            for p in self.t_gates:
+                nn.init.xavier_uniform_(p)      # [T,1]
+            # bd_gates и d_gates остаются нулями (равномерные softmax по D)
 
         # Классификатор
         self._calculate_classifier_input_dim()
@@ -77,7 +109,7 @@ class VideoFormer(nn.Module):
         # Фиксируем "память"
         fixed_seq = sequences
 
-        # Последовательные слои трансформера + gated residual
+        # Последовательные слои трансформера + (при необходимости) gated residual
         for i in range(len(self.transformer)):
             att = self.transformer[i](
                 sequences,   # Q
@@ -87,7 +119,7 @@ class VideoFormer(nn.Module):
             )  # [B, T, hidden_dim]
 
             if self.gate_mode is None:
-                # Стандартный residual без gating
+                # Стандартный residual
                 sequences = sequences + att
             else:
                 alpha = self._compute_alpha(i, sequences)  # [B, T, hidden_dim]
@@ -104,41 +136,50 @@ class VideoFormer(nn.Module):
 
     def _compute_alpha(self, layer_idx: int, sequences: torch.Tensor) -> torch.Tensor:
         """
-        Вычисление alpha для заданного слоя в зависимости от режима gate_mode.
+        sequences: [B, T, D]
+        Возвращает alpha: [B, T, D]
 
-        Вход:
-            sequences: [B, T, D]
-        Выход:
-            alpha:     [B, T, D]  (через broadcast)
+        Режимы (форма alpha до expand_as):
+          - "bt": [B, T, 1]  (per-sample, per-time)      ← bt_gates (логиты по T)
+          - "bd": [B, 1, D]  (per-sample, per-feature)   ← bd_gates (логиты по D)
+          - "t":  [1, T, 1]  (global по батчу, по времени) ← t_gates
+          - "d":  [1, 1, D]  (global по батчу, по фичам)   ← d_gates
+
         """
-        if self.gate_mode in ("bt", "t"):
-            # time-based gate: сначала [B, T, 1]
-            alpha = torch.sigmoid(self.time_gates[layer_idx](sequences))  # [B, T, 1]
+        B, T, D = sequences.shape
 
-            if self.gate_mode == "t":
-                # общий по батчу: [1, T, 1]
-                alpha = alpha.mean(dim=0, keepdim=True)
+        if self.gate_mode == "bt":
+            # per-sample, per-time (формально B×T×1 после expand по B)
+            logits_t = self.bt_gates[layer_idx]              # [T, 1]
+            alpha_t = torch.softmax(logits_t.squeeze(-1), 0) # [T]
+            alpha = alpha_t.view(1, T, 1).expand(B, T, 1)    # [B, T, 1]
 
-        elif self.gate_mode in ("bd", "d"):
-            # feature-based gate
-            # усредняем по времени -> [B, D]
-            seq_mean = sequences.mean(dim=1)                          # [B, D]
-            alpha = torch.sigmoid(self.feat_gates[layer_idx](seq_mean))  # [B, D]
-            alpha = alpha.unsqueeze(1)                                # [B, 1, D]
+        elif self.gate_mode == "bd":
+            # per-sample, per-feature (формально B×1×D после expand по B)
+            logits_d = self.bd_gates[layer_idx]              # [D]
+            alpha_d = torch.softmax(logits_d, 0)             # [D]
+            alpha = alpha_d.view(1, 1, D).expand(B, 1, D)    # [B, 1, D]
 
-            if self.gate_mode == "d":
-                # общий по батчу: [1, 1, D]
-                alpha = alpha.mean(dim=0, keepdim=True)
+        elif self.gate_mode == "t":
+            # global по батчу, по времени: 1×T×1
+            logits_t = self.t_gates[layer_idx]               # [T, 1]
+            alpha_t = torch.softmax(logits_t.squeeze(-1), 0) # [T]
+            alpha = alpha_t.view(1, T, 1)                    # [1, T, 1]
+
+        elif self.gate_mode == "d":
+            # global по батчу, по фичам: 1×1×D
+            logits_d = self.d_gates[layer_idx]               # [D]
+            alpha_d = torch.softmax(logits_d, 0)             # [D]
+            alpha = alpha_d.view(1, 1, D)                    # [1, 1, D]
 
         else:
             raise ValueError(f"Unknown gate_mode: {self.gate_mode}")
 
-        # Приводим к размеру [B, T, D] через broadcast
-        alpha = alpha.expand_as(sequences)
+        # Приводим к [B,T,D] broadcasting-ом
+        alpha = alpha.expand_as(sequences)                   # [B, T, D]
         return alpha
 
     def _calculate_classifier_input_dim(self):
-
         dummy_video = torch.randn(1, self.seg_len, self.hidden_dim)
         video_pool = self._pool_features(dummy_video, mask=None)
         self.classifier_input_dim = video_pool.size(1)
@@ -215,7 +256,7 @@ class VideoFormerMoE(nn.Module):
             for _ in range(tr_layer_number)
         ])
 
-        # 4) классификатор (как у тебя)
+        # 4) классификатор
         self._calculate_classifier_input_dim()
         self.classifier = nn.Sequential(
             nn.Linear(self.classifier_input_dim, out_features),
@@ -235,7 +276,7 @@ class VideoFormerMoE(nn.Module):
         B, T, H = sequences.shape
 
         for layer_idx in range(self.num_layers):
-            # ── 1) прогоняем через всех экспертов этого слоя ─────────
+            # 1) прогоняем через всех экспертов этого слоя
             expert_outs = []
             for e_idx, expert in enumerate(self.moe_layers[layer_idx]):
                 att_e = expert(
@@ -249,7 +290,7 @@ class VideoFormerMoE(nn.Module):
             # [B,T,E,H]
             expert_outs = torch.cat(expert_outs, dim=2)
 
-            # ── 2) router: веса по экспертам для каждого токена ──────
+            # 2) router: веса по экспертам для каждого токена
             logits = self.routers[layer_idx](sequences)   # [B,T,E]
 
             if self.moe_top_k is not None and self.moe_top_k < self.moe_num_experts:
@@ -262,17 +303,16 @@ class VideoFormerMoE(nn.Module):
             probs = torch.softmax(logits, dim=-1)  # [B,T,E]
             probs = probs.unsqueeze(-1)            # [B,T,E,1]
 
-            # ── 3) смешиваем экспертов ───────────────────────────────
+            # 3) смешиваем экспертов
             att_mix = (probs * expert_outs).sum(dim=2)  # [B,T,H]
 
-            # обычный residual (можно сюда потом прикрутить твой alpha-гейтинг)
+            # обычный residual
             sequences = sequences + att_mix
 
-        # pooling + classifier как в твоей модели
+        # pooling + classifier
         sequences_pool = self._pool_features(sequences, mask)
         return self.classifier(sequences_pool)
 
-    # ── служебные функции такие же, как у тебя ─────────────────────────
     def _calculate_classifier_input_dim(self):
         dummy_video = torch.randn(1, self.seg_len, self.hidden_dim)
         video_pool = self._pool_features(dummy_video, mask=None)

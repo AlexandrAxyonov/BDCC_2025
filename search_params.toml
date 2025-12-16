@@ -1,6 +1,6 @@
 [grid]
-# hidden_dim = [128, 256, 512]
-hidden_dim = [128]
+hidden_dim = [128, 256, 512]
+# hidden_dim = [128]
 
 # num_transformer_heads = [2,4,8]
 # tr_layers = [5,10, 15]
