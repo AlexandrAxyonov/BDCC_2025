@@ -488,3 +488,32 @@ def prototype_contrastive_loss(embeddings, labels, prototypes, num_classes, temp
     # Loss per sample
     loss = -torch.log(pos_sum / all_sum + 1e-8)           # [B]
     return loss.mean()
+
+def prototype_contrastive_loss_2(embeddings, labels, prototypes, num_classes, temperature=0.1):
+    device = embeddings.device
+    B, D = embeddings.shape
+    P = prototypes.shape[0]
+    n_proto = P // num_classes
+
+    emb_norm = F.normalize(embeddings, dim=1)         # [B,D]
+    proto_norm = F.normalize(prototypes, dim=1)       # [P,D]
+    sim = torch.matmul(emb_norm, proto_norm.t()) / temperature  # [B,P]
+
+    # ids прототипов своего класса: [B, n_proto]
+    proto_indices = torch.arange(n_proto, device=device).unsqueeze(0)  # [1,n_proto]
+    class_proto_ids = labels.unsqueeze(1) * n_proto + proto_indices    # [B,n_proto]
+
+    # выбираем лучший прототип своего класса: [B]
+    sim_in_class = sim.gather(1, class_proto_ids)          # [B,n_proto]
+    best_in_class = sim_in_class.argmax(dim=1)             # [B]
+    pos_ids = class_proto_ids[torch.arange(B, device=device), best_in_class]  # [B]
+
+    # pos_mask: только один прототип-позитив
+    pos_mask = torch.zeros_like(sim, dtype=torch.bool)
+    pos_mask.scatter_(1, pos_ids.unsqueeze(1), True)
+
+    exp_sim = torch.exp(sim)
+    pos_sum = (exp_sim * pos_mask).sum(dim=1)      # [B]
+    all_sum = exp_sim.sum(dim=1)                   # [B]
+    loss = -torch.log(pos_sum / (all_sum + 1e-8) + 1e-8)
+    return loss.mean()

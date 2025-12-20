@@ -331,17 +331,13 @@ class VideoFormer_with_Prototypes(nn.Module):
         seg_len: int = 20,
         out_features: int = 128,
         num_classes: int = 7,
-        gate_mode: str | None = None,
         num_prototypes_per_class: int = 3,  # ← новое
     ):
         super(VideoFormer_with_Prototypes, self).__init__()
 
-        if isinstance(gate_mode, str) and gate_mode.lower() in {"none", "", "null"}:
-            gate_mode = None
 
         self.seg_len = seg_len
         self.hidden_dim = hidden_dim
-        self.gate_mode = gate_mode
 
         # Проекция входных фич в hidden_dim
         self.image_proj = nn.Sequential(
@@ -355,25 +351,16 @@ class VideoFormer_with_Prototypes(nn.Module):
             TransformerEncoderLayer(
                 input_dim=hidden_dim,
                 num_heads=num_transformer_heads,
-                dropout=dropout,
+                dropout=0.1,
                 positional_encoding=positional_encoding,
             )
             for _ in range(tr_layer_number)
         ])
 
-        # if self.gate_mode is not None:
-        #     self.time_gates = nn.ModuleList([
-        #         nn.Linear(hidden_dim, 1)          # [B, T, D] -> [B, T, 1]
-        #         for _ in range(tr_layer_number)
-        #     ])
-        #     self.feat_gates = nn.ModuleList([
-        #         nn.Linear(hidden_dim, hidden_dim) # [B, D] -> [B, D]
-        #         for _ in range(tr_layer_number)
-        #     ])
-
         self.num_classes = num_classes
         self.num_prototypes_per_class = num_prototypes_per_class
         self.total_prototypes = num_classes * num_prototypes_per_class
+
 
         # Прототипы: [total_prototypes, hidden_dim]
         self.prototypes = nn.Parameter(
@@ -383,6 +370,8 @@ class VideoFormer_with_Prototypes(nn.Module):
         nn.init.normal_(self.prototypes, mean=0.0, std=0.02)
 
         self.class_mix_weights = nn.Parameter(torch.ones(num_classes) * 0.5)  # начальное значение 0.5
+
+        self.proto_temperature = 0.1
 
         # Классификатор
         self._calculate_classifier_input_dim()
@@ -402,23 +391,19 @@ class VideoFormer_with_Prototypes(nn.Module):
         sequences = self.image_proj(sequences)  # [B, T, hidden_dim]
 
         # Фиксируем "память"
-        fixed_seq = sequences
+        # fixed_seq = sequences
 
         # Последовательные слои трансформера + gated residual
         for i in range(len(self.transformer)):
             att = self.transformer[i](
                 sequences,   # Q
-                fixed_seq,   # K
-                fixed_seq,   # V
+                sequences,   # K
+                sequences,   # V
                 key_padding_mask=(~mask) if mask is not None else None,
             )  # [B, T, hidden_dim]
 
-            if self.gate_mode is None:
-                # Стандартный residual без gating
-                sequences = sequences + att
-            else:
-                alpha = self._compute_alpha(i, sequences)  # [B, T, hidden_dim]
-                sequences = (1.0 - alpha) * sequences + alpha * att
+            sequences = sequences + att
+
 
         # Пулинг по времени
         sequences_pool = self._pool_features(sequences, mask)  # [B, D]
@@ -426,15 +411,23 @@ class VideoFormer_with_Prototypes(nn.Module):
         classifier_logits = self.classifier(sequences_pool)  # [B, C]
         proto_logits = self._compute_proto_logits(sequences_pool)  # [B, C]
 
+        #softmax на логитсы
+        # softmax по классам (dim=1, потому что размерность [B, C])
+        # classifier_probs = F.softmax(classifier_logits, dim=1)  # [B, C]
+        # proto_probs      = F.softmax(proto_logits, dim=1)       # [B, C]
+
         # === Смешивание с обучаемыми весами по классам ===
         # Применяем сигмоиду, чтобы веса были в [0,1]
         mix_weights = torch.sigmoid(self.class_mix_weights)  # [C]
+
         # Расширяем до [B, C]
         mix_weights = mix_weights.unsqueeze(0).expand_as(classifier_logits)
 
+        # final_logits = mix_weights * classifier_logits + (1 - mix_weights) * proto_logits
         final_logits = mix_weights * classifier_logits + (1 - mix_weights) * proto_logits
 
         # Возвращаем всё, что нужно для лосса
+        # return final_logits, classifier_logits, proto_logits, sequences_pool
         return final_logits, classifier_logits, proto_logits, sequences_pool
 
     def _compute_proto_logits(self, x: torch.Tensor) -> torch.Tensor:
@@ -449,50 +442,27 @@ class VideoFormer_with_Prototypes(nn.Module):
         # Cosine similarity: [B, P]
         cos_sim = torch.matmul(x_norm, p_norm.t())  # [B, total_prototypes]
 
-        # Группируем прототипы по классам
-        # Формируем логиты для каждого класса: максимум или среднее по его прототипам
-        # Здесь — максимум (можно и среднее, зависит от задачи)
         cos_sim = cos_sim.view(-1, self.num_classes, self.num_prototypes_per_class)  # [B, C, N]
+
         proto_logits_per_class = cos_sim.max(dim=2).values  # [B, C] — strongest prototype per class
+        # proto_logits_per_class = cos_sim.mean(dim=2)  # [B, C] — strongest prototype per class
+
+        # k = 2  # начать с 2; если не зайдет — 3
+        # topk_vals = cos_sim.topk(k, dim=2).values      # [B, C, k]
+        # proto_logits_per_class = topk_vals.mean(dim=2) # [B, C]
+
+
+        proto_logits_per_class = proto_logits_per_class / self.proto_temperature
+
+        # t = self.proto_temperature
+        # n = self.num_prototypes_per_class
+
+        # cos_sim = cos_sim.view(-1, self.num_classes, n)      # [B,C,N]
+        # proto_logits = torch.logsumexp(cos_sim / t, dim=2) - math.log(n)  # [B,C]
+        # return proto_logits
 
         return proto_logits_per_class
 
-    #    GATING: alpha(x)        #
-
-    def _compute_alpha(self, layer_idx: int, sequences: torch.Tensor) -> torch.Tensor:
-        """
-        Вычисление alpha для заданного слоя в зависимости от режима gate_mode.
-
-        Вход:
-            sequences: [B, T, D]
-        Выход:
-            alpha:     [B, T, D]  (через broadcast)
-        """
-        if self.gate_mode in ("bt", "t"):
-            # time-based gate: сначала [B, T, 1]
-            alpha = torch.sigmoid(self.time_gates[layer_idx](sequences))  # [B, T, 1]
-
-            if self.gate_mode == "t":
-                # общий по батчу: [1, T, 1]
-                alpha = alpha.mean(dim=0, keepdim=True)
-
-        elif self.gate_mode in ("bd", "d"):
-            # feature-based gate
-            # усредняем по времени -> [B, D]
-            seq_mean = sequences.mean(dim=1)                          # [B, D]
-            alpha = torch.sigmoid(self.feat_gates[layer_idx](seq_mean))  # [B, D]
-            alpha = alpha.unsqueeze(1)                                # [B, 1, D]
-
-            if self.gate_mode == "d":
-                # общий по батчу: [1, 1, D]
-                alpha = alpha.mean(dim=0, keepdim=True)
-
-        else:
-            raise ValueError(f"Unknown gate_mode: {self.gate_mode}")
-
-        # Приводим к размеру [B, T, D] через broadcast
-        alpha = alpha.expand_as(sequences)
-        return alpha
 
     def _calculate_classifier_input_dim(self):
 

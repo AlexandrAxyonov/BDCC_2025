@@ -44,8 +44,9 @@ device = "cuda"           # "cuda" или "cpu", куда грузить мод�
 selection_metric = "UAR"   # по какой метрике отслеживаем
 add_similarity = true     # считает косинусное сходство эмбеддингов модальностей (или эмбеддинга к некоторому «гайд-банку»/прототипам классов). Используется в MultiModalFusionModel
 class_weighting = "balanced" # "none"
-num_prototypes_per_class = 1
-prototype_alpha = 1
+num_prototypes_per_class = 9
+prototype_alpha = 0.05
+print_logits = false
 
 # ---------------------------
 # Параметры модели

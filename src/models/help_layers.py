@@ -29,6 +29,7 @@ class AddAndNorm(nn.Module):
 
     def forward(self, x, residual):
         return self.norm(x + self.dropout(residual))
+        # return self.norm(residual + self.dropout(x))
 
 
 class PositionalEncoding(nn.Module):

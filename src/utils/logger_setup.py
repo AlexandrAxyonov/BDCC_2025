@@ -1,7 +1,8 @@
 # utils/logger_setup.py
-
+import torch
 import logging
 from colorlog import ColoredFormatter
+import numpy as np
 
 def setup_logger(level=logging.INFO, log_file=None):
     """
@@ -107,3 +108,34 @@ def color_split(name: str) -> str:
     END = "\033[0m"
     key = name.upper()
     return f"{SPLIT_COLORS.get(key, '')}{name}{END}"
+
+
+# ===== DEBUG LOGITS CHECK (root logger) =====
+def dbg_check_logits(final_logits=None, cls_logits=None, proto_logits=None, print_logits = False, prefix="[DBG]"):
+    if not print_logits:
+        return
+    x = final_logits if final_logits is not None else (cls_logits if cls_logits is not None else proto_logits)
+    if x is None:
+        return
+    x = x.detach().float().cpu()
+    logging.info(f"{prefix} mean={x.mean():.3f} std={x.std():.3f} min={x.min():.3f} max={x.max():.3f}")
+    top2 = torch.topk(x, k=2, dim=1).values
+    logging.info(f"{prefix} margin(top1-top2)={(top2[:,0]-top2[:,1]).mean().item():.3f}")
+    logging.info(f"{prefix} per-class mean: " + " ".join(f"{v:.2f}" for v in x.mean(0).tolist()))
+    if cls_logits is not None and proto_logits is not None:
+        c = cls_logits.detach().float().cpu().argmax(1)
+        p = proto_logits.detach().float().cpu().argmax(1)
+        agree = (c == p).float().mean().item()
+        logging.info(f"{prefix} heads agree={agree:.3f}")
+# ===== END DEBUG LOGITS CHECK =====
+
+# ===== DEBUG RAW LOGITS SLICE (root logger) =====
+def dbg_dump_logits(x, printed=False, prefix="[DBG]", max_rows=5, max_cols=8):
+    if not printed or x is None:
+        return
+    x = x.detach().float().cpu()
+    r = min(max_rows, x.size(0))
+    c = min(max_cols, x.size(1))
+    np.set_printoptions(precision=2, suppress=True, linewidth=200)
+    logging.info(f"{prefix} logits[:{r}, :{c}] =\n{ x[:r, :c].numpy() }")
+# ===== END DEBUG RAW LOGITS SLICE =====

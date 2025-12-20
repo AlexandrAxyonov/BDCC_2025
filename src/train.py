@@ -16,9 +16,9 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import f1_score, recall_score
 
 from src.models.models import VideoFormer, VideoFormerMoE, VideoFormer_with_Prototypes
-from src.utils.logger_setup import color_metric, color_split
+from src.utils.logger_setup import color_metric, color_split,dbg_check_logits, dbg_dump_logits
 from src.utils.schedulers import SmartScheduler
-from src.utils.losses import prototype_contrastive_loss
+from src.utils.losses import prototype_contrastive_loss, prototype_contrastive_loss_2
 
 CLASS_LABELS = {
     0: "control",
@@ -243,7 +243,7 @@ def _map_probs_to_single_label(p_dep: np.ndarray, p_park: np.ndarray,
 
 
 @torch.no_grad()
-def _eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device,
+def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
             avg_mode: str, metrics_num_classes: int, model_name: str,
             multi_label: bool = False,
             thr_dep: float = 0.5, thr_park: float = 0.5,
@@ -256,7 +256,8 @@ def _eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device,
     model.eval()
     all_y, all_p = [], []
 
-    for batch in tqdm(loader, desc="Eval", leave=False):
+    # for batch in tqdm(loader, desc="Eval", leave=False):
+    for bidx, batch in enumerate(tqdm(loader, desc="Eval", leave=False)):
         if batch is None:
             continue
 
@@ -270,15 +271,27 @@ def _eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device,
 
         # logits = model(X.to(device))  # [B,C]
         if model_name == 'prototypes':
-                logits, _, _, embeddings =  model(
-                    X.to(device, non_blocking=True),
-                    mask=mask.to(device, non_blocking=True) if mask is not None else None
-                )
+            final, cls_l, proto_l, embeddings = model(
+                X.to(device, non_blocking=True),
+                mask=mask.to(device, non_blocking=True) if mask is not None else None
+            )
+            if bidx == 0:
+                dbg_dump_logits(final, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=5, max_cols=final.size(1))
+                dbg_dump_logits(cls_l, cfg.print_logits, prefix="[DBG:VAL:cls]",   max_rows=5, max_cols=cls_l.size(1))
+                dbg_dump_logits(proto_l, cfg.print_logits, prefix="[DBG:VAL:proto]", max_rows=5, max_cols=proto_l.size(1))
+                dbg_check_logits(final_logits=final, cls_logits=cls_l, proto_logits=proto_l, print_logits=cfg.print_logits,  prefix="[DBG:VAL]")
+            logits = final
+            # logits = cls_l
+
         else:
             logits =  model(
                 X.to(device, non_blocking=True),
                 mask=mask.to(device, non_blocking=True) if mask is not None else None
             )
+            if bidx == 0:
+                # _dbg_check_logits(final_logits=logits, prefix="[DBG:VAL]")
+                dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=5, max_cols=logits.size(1))
+
         if not multi_label:
             pred = logits.argmax(dim=1)
         else:
@@ -463,15 +476,29 @@ def train(
 
             # loss = criterion(logits, y)
             if cfg.model_name.lower() == 'prototypes':
-                logits, _, _, embeddings =  model(
+                # logits, _, _, embeddings =  model(
+                # _, logits, _, embeddings =  model(
+                final, cls_l, proto_l, embeddings =  model(
                     X.to(device, non_blocking=True),
                     mask=mask.to(device, non_blocking=True) if mask is not None else None
                 )
+                # logits = cls_l
+                logits = final
+
+                if batch_idx == 0:  # печатаем один раз за эпоху
+                    dbg_dump_logits(final, cfg.print_logits,   prefix="[DBG:TRAIN:final]", max_rows=5, max_cols=final.size(1))
+                    dbg_dump_logits(cls_l, cfg.print_logits, prefix="[DBG:TRAIN:cls]",   max_rows=5, max_cols=cls_l.size(1))
+                    dbg_dump_logits(proto_l, cfg.print_logits, prefix="[DBG:TRAIN:proto]", max_rows=5, max_cols=proto_l.size(1))
+                    dbg_check_logits(final_logits=final, cls_logits=cls_l, proto_logits=proto_l, print_logits= cfg.print_logits, prefix="[DBG:TRAIN]")
+
             else:
                 logits =  model(
                     X.to(device, non_blocking=True),
                     mask=mask.to(device, non_blocking=True) if mask is not None else None
                 )
+                if batch_idx == 0:
+                    # _dbg_check_logits(cls_logits=logits, prefix="[DBG:TRAIN]")
+                    dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:TRAIN:final]", max_rows=5, max_cols=logits.size(1))
 
             loss = criterion(logits, y)
 
@@ -480,6 +507,7 @@ def train(
                     embeddings, y, model.prototypes,
                     num_classes=model.num_classes, temperature=0.1
                 )
+
                 alpha = cfg.prototype_alpha  # можно настраивать
                 loss = loss + alpha * cont_loss
 
@@ -531,7 +559,7 @@ def train(
             for name, ldr in dev_loaders.items():
 
                 md = _eval_epoch(
-                    model, ldr, device, avg_mode,
+                    cfg, model, ldr, device, avg_mode,
                     metrics_num_classes,
                     model_name = cfg.model_name.lower(),
                     multi_label=multi_label,
@@ -548,7 +576,7 @@ def train(
         if test_loaders:
             for name, ldr in test_loaders.items():
                 mt = _eval_epoch(
-                    model, ldr, device, avg_mode,
+                    cfg, model, ldr, device, avg_mode,
                     metrics_num_classes,
                     model_name = cfg.model_name.lower(),
                     multi_label=multi_label,
