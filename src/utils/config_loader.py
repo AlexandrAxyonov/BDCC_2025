@@ -55,6 +55,7 @@ class ConfigLoader:
         self.class_weighting = train_general.get("class_weighting", "balanced")
         self.num_prototypes_per_class = train_general.get("num_prototypes_per_class", 1)
         self.prototype_alpha = train_general.get("prototype_alpha", 1)
+        self.num_archetypes = train_general.get("num_archetypes", 1)
         self.print_logits = train_general.get("print_logits", False)
 
         # ---------------------------

@@ -15,7 +15,7 @@ from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import f1_score, recall_score
 
-from src.models.models import VideoFormer, VideoFormerMoE, VideoFormer_with_Prototypes
+from src.models.models import VideoFormer, VideoFormer_with_Archetypes, VideoFormer_with_Prototypes
 from src.utils.logger_setup import color_metric, color_split,dbg_check_logits, dbg_dump_logits
 from src.utils.schedulers import SmartScheduler
 from src.utils.losses import prototype_contrastive_loss, prototype_contrastive_loss_2
@@ -164,19 +164,8 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
             num_classes=num_classes,
             gate_mode=cfg.gate_mode
         )
-        # model = VideoFormerMoE(
-        #     input_dim=input_dim,
-        #     hidden_dim=cfg.hidden_dim,
-        #     num_transformer_heads=cfg.num_transformer_heads,
-        #     positional_encoding=cfg.positional_encoding,
-        #     dropout=cfg.dropout,
-        #     tr_layer_number=cfg.tr_layers,
-        #     seg_len=seq_len,
-        #     out_features=cfg.out_features,
-        #     num_classes=num_classes,
-        # )
 
-    elif model_name in ("prototypes"):
+    elif model_name == "prototypes":
         model = VideoFormer_with_Prototypes(
             input_dim=input_dim,
             hidden_dim=cfg.hidden_dim,
@@ -188,6 +177,20 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
             out_features=cfg.out_features,
             num_classes=num_classes,
             num_prototypes_per_class=cfg.num_prototypes_per_class
+        )
+    elif model_name == "archetypes":
+        model = VideoFormer_with_Archetypes(
+            input_dim=input_dim,
+            hidden_dim=cfg.hidden_dim,
+            num_transformer_heads=cfg.num_transformer_heads,
+            positional_encoding=cfg.positional_encoding,
+            dropout=cfg.dropout,
+            tr_layer_number=cfg.tr_layers,
+            seg_len=seq_len,
+            out_features=cfg.out_features,
+            num_classes=num_classes,
+            num_archetypes=cfg.num_archetypes,
+            commit_beta=getattr(cfg, "commit_beta", 0.25),
         )
 
     else:
@@ -275,6 +278,7 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
                 X.to(device, non_blocking=True),
                 mask=mask.to(device, non_blocking=True) if mask is not None else None
             )
+
             if bidx == 0:
                 dbg_dump_logits(final, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=5, max_cols=final.size(1))
                 dbg_dump_logits(cls_l, cfg.print_logits, prefix="[DBG:VAL:cls]",   max_rows=5, max_cols=cls_l.size(1))
@@ -283,6 +287,13 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
             logits = final
             # logits = cls_l
 
+        elif model_name == "archetypes":
+            logits, vq_loss, idx = model(
+                X.to(device, non_blocking=True),
+                mask=mask.to(device, non_blocking=True) if mask is not None else None
+                )
+            if bidx == 0:
+                dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=7, max_cols=logits.size(1))
         else:
             logits =  model(
                 X.to(device, non_blocking=True),
@@ -290,6 +301,7 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
             )
             if bidx == 0:
                 # _dbg_check_logits(final_logits=logits, prefix="[DBG:VAL]")
+                print('123')
                 dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=5, max_cols=logits.size(1))
 
         if not multi_label:
@@ -475,6 +487,7 @@ def train(
             # )
 
             # loss = criterion(logits, y)
+
             if cfg.model_name.lower() == 'prototypes':
                 # logits, _, _, embeddings =  model(
                 # _, logits, _, embeddings =  model(
@@ -491,6 +504,13 @@ def train(
                     dbg_dump_logits(proto_l, cfg.print_logits, prefix="[DBG:TRAIN:proto]", max_rows=5, max_cols=proto_l.size(1))
                     dbg_check_logits(final_logits=final, cls_logits=cls_l, proto_logits=proto_l, print_logits= cfg.print_logits, prefix="[DBG:TRAIN]")
 
+            elif cfg.model_name.lower() == "archetypes":
+                logits, vq_loss, idx = model(
+                    X.to(device, non_blocking=True),
+                    mask=mask.to(device, non_blocking=True) if mask is not None else None
+                )
+                if batch_idx == 0:
+                    dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:TRAIN:final]", max_rows=7, max_cols=logits.size(1))
             else:
                 logits =  model(
                     X.to(device, non_blocking=True),
@@ -510,6 +530,10 @@ def train(
 
                 alpha = cfg.prototype_alpha  # можно настраивать
                 loss = loss + alpha * cont_loss
+
+            elif cfg.model_name.lower() == "archetypes":
+                vq_lambda = getattr(cfg, "vq_lambda", 0.25)
+                loss = loss + vq_lambda * vq_loss
 
             loss.backward()
             optimizer.step()

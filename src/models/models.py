@@ -490,3 +490,127 @@ class VideoFormer_with_Prototypes(nn.Module):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+
+
+
+class VideoFormer_with_Archetypes(nn.Module):
+    """
+    AURA/VQ-style archetypes:
+      - hard assignment to nearest archetype by cosine similarity
+      - straight-through quantization for encoder grads
+      - VQ-VAE loss: codebook + beta * commitment (with stop-grad)
+    Returns: logits, vq_loss, idx
+    """
+    def __init__(
+        self,
+        input_dim: int = 512,
+        hidden_dim: int = 128,
+        num_transformer_heads: int = 2,
+        positional_encoding: bool = True,
+        dropout: float = 0.1,
+        tr_layer_number: int = 5,
+        seg_len: int = 20,
+        out_features: int = 128,
+        num_classes: int = 3,
+        num_archetypes: int = 12,
+        commit_beta: float = 0.25,
+    ):
+        super().__init__()
+
+        self.seg_len = seg_len
+        self.hidden_dim = hidden_dim
+        self.num_classes = num_classes
+        self.num_archetypes = num_archetypes
+        self.commit_beta = float(commit_beta)
+
+        # input projection
+        self.image_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(dropout),
+        )
+
+        # transformer stack
+        self.transformer = nn.ModuleList([
+            TransformerEncoderLayer(
+                input_dim=hidden_dim,
+                num_heads=num_transformer_heads,
+                dropout=0.1,
+                positional_encoding=positional_encoding,
+            )
+            for _ in range(tr_layer_number)
+        ])
+
+        # archetype codebook (learnable)
+        self.archetypes = nn.Parameter(torch.randn(num_archetypes, hidden_dim))
+
+        # classifier head (same style as your prototypes model)
+        self._calculate_classifier_input_dim()
+        self.classifier = nn.Sequential(
+            nn.Linear(self.classifier_input_dim, out_features),
+            nn.LayerNorm(out_features),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(out_features, num_classes),
+        )
+
+        self._init_weights()
+
+    def forward(self, sequences: torch.Tensor, mask: torch.Tensor | None = None):
+        # [B,T,Din] -> [B,T,H]
+        sequences = self.image_proj(sequences)
+
+        # transformer
+        for layer in self.transformer:
+            att = layer(
+                sequences, sequences, sequences,
+                key_padding_mask=(~mask) if mask is not None else None,
+            )
+            sequences = sequences + att
+
+        # pool -> [B,H]
+        f = self._pool_features(sequences, mask)
+
+        # normalize for cosine geometry
+        f_n = F.normalize(f, dim=1)                       # [B,H]
+        A_n = F.normalize(self.archetypes, dim=1)         # [K,H]
+
+        # hard assignment by cosine
+        sim = f_n @ A_n.t()                               # [B,K]
+        idx = sim.argmax(dim=1)                           # [B]
+        e_n = A_n[idx]                                    # [B,H]
+
+        # straight-through quantization in normalized space
+        z_q = f_n + (e_n - f_n).detach()
+
+        logits = self.classifier(z_q)
+
+        # VQ loss in the same (normalized) space
+        codebook_loss = F.mse_loss(e_n, f_n.detach())
+        commit_loss   = F.mse_loss(f_n, e_n.detach())
+        vq_loss = codebook_loss + self.commit_beta * commit_loss
+
+        return logits, vq_loss, idx
+
+
+    def _calculate_classifier_input_dim(self):
+        dummy_video = torch.randn(1, self.seg_len, self.hidden_dim)
+        video_pool = self._pool_features(dummy_video, mask=None)
+        self.classifier_input_dim = video_pool.size(1)
+
+    def _pool_features(self, sequences: torch.Tensor, mask: torch.Tensor | None = None):
+        if mask is None:
+            return sequences.mean(dim=1)
+        denom = mask.sum(dim=1).clamp(min=1).unsqueeze(-1).to(sequences.dtype)
+        sequences_masked = sequences.masked_fill(~mask.unsqueeze(-1), 0.0)
+        return sequences_masked.sum(dim=1) / denom
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
