@@ -452,7 +452,21 @@ class MultiTaskLossWithNaN(nn.Module):
 
         return loss
 
-def prototype_contrastive_loss(embeddings, labels, prototypes, num_classes, temperature=0.1):
+def _proto_similarity_matrix(embeddings, prototypes, similarity: str) -> torch.Tensor:
+    sim_name = (similarity or "cosine").lower()
+    if sim_name in {"euclid", "euclidean", "l2"}:
+        sim_name = "inv_euclid"
+    if sim_name == "cosine":
+        emb_norm = F.normalize(embeddings, dim=1)
+        proto_norm = F.normalize(prototypes, dim=1)
+        return torch.matmul(emb_norm, proto_norm.t())
+    if sim_name == "inv_euclid":
+        dist = torch.cdist(embeddings, prototypes, p=2)
+        return 1.0 / (1.0 + dist)
+    raise ValueError(f"unknown similarity={sim_name!r}")
+
+
+def prototype_contrastive_loss(embeddings, labels, prototypes, num_classes, temperature=0.1, similarity="cosine"):
     """
     embeddings: [B, D]
     labels: [B]
@@ -463,12 +477,10 @@ def prototype_contrastive_loss(embeddings, labels, prototypes, num_classes, temp
     P = prototypes.shape[0]
     n_proto = P // num_classes
 
-    # Нормализуем
-    emb_norm = F.normalize(embeddings, dim=1)           # [B, D]
-    proto_norm = F.normalize(prototypes, dim=1)         # [P, D]
+    sim = _proto_similarity_matrix(embeddings, prototypes, similarity) / temperature  # [B, P]
 
-    # Cosine similarity matrix: [B, P]
-    sim = torch.matmul(emb_norm, proto_norm.t()) / temperature  # [B, P]
+    # Нормализуем
+
 
     # Маска положительных пар: [B, P]
     # Для каждого батч-элемента — прототипы его класса
@@ -489,15 +501,14 @@ def prototype_contrastive_loss(embeddings, labels, prototypes, num_classes, temp
     loss = -torch.log(pos_sum / all_sum + 1e-8)           # [B]
     return loss.mean()
 
-def prototype_contrastive_loss_2(embeddings, labels, prototypes, num_classes, temperature=0.1):
+def prototype_contrastive_loss_2(embeddings, labels, prototypes, num_classes, temperature=0.1, similarity="cosine"):
     device = embeddings.device
     B, D = embeddings.shape
     P = prototypes.shape[0]
     n_proto = P // num_classes
 
-    emb_norm = F.normalize(embeddings, dim=1)         # [B,D]
-    proto_norm = F.normalize(prototypes, dim=1)       # [P,D]
-    sim = torch.matmul(emb_norm, proto_norm.t()) / temperature  # [B,P]
+    sim = _proto_similarity_matrix(embeddings, prototypes, similarity) / temperature  # [B, P]
+
 
     # ids прототипов своего класса: [B, n_proto]
     proto_indices = torch.arange(n_proto, device=device).unsqueeze(0)  # [1,n_proto]

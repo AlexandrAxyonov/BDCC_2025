@@ -92,20 +92,20 @@ class VideoFormer(nn.Module):
 
         self._init_weights()
 
-    def forward(self, sequences: torch.Tensor, mask: torch.Tensor | None = None):
+    def forward(self, sequences: torch.Tensor, mask: torch.Tensor | None = None, return_embeddings: bool = False):
 
         # Проекция входа
         sequences = self.image_proj(sequences)  # [B, T, hidden_dim]
 
         # Фиксируем "память"
-        fixed_seq = sequences
+        # fixed_seq = sequences
 
         # Последовательные слои трансформера + (при необходимости) gated residual
         for i in range(len(self.transformer)):
             att = self.transformer[i](
                 sequences,   # Q
-                fixed_seq,   # K
-                fixed_seq,   # V
+                sequences,   # K
+                sequences,   # V
                 key_padding_mask=(~mask) if mask is not None else None,
             )  # [B, T, hidden_dim]
 
@@ -121,6 +121,8 @@ class VideoFormer(nn.Module):
 
         # Классификатор
         output = self.classifier(sequences_pool)  # [B, num_classes]
+        if return_embeddings:
+            return output, sequences_pool
         return output
 
     #    GATING: alpha(x)        #
@@ -331,7 +333,9 @@ class VideoFormer_with_Prototypes(nn.Module):
         seg_len: int = 20,
         out_features: int = 128,
         num_classes: int = 7,
-        num_prototypes_per_class: int = 3,  # ← новое
+        num_prototypes_per_class: int = 3,
+        proto_similarity: str = "cosine",
+        proto_temperature: float = 0.1,
     ):
         super(VideoFormer_with_Prototypes, self).__init__()
 
@@ -360,6 +364,11 @@ class VideoFormer_with_Prototypes(nn.Module):
         self.num_classes = num_classes
         self.num_prototypes_per_class = num_prototypes_per_class
         self.total_prototypes = num_classes * num_prototypes_per_class
+        self.proto_similarity = (proto_similarity or "cosine").lower()
+        if self.proto_similarity in {"euclid", "euclidean", "l2"}:
+            self.proto_similarity = "inv_euclid"
+        if self.proto_similarity not in {"cosine", "inv_euclid"}:
+            raise ValueError(f"unknown proto_similarity={self.proto_similarity!r}")
 
 
         # Прототипы: [total_prototypes, hidden_dim]
@@ -371,7 +380,7 @@ class VideoFormer_with_Prototypes(nn.Module):
 
         self.class_mix_weights = nn.Parameter(torch.ones(num_classes) * 0.5)  # начальное значение 0.5
 
-        self.proto_temperature = 0.1
+        self.proto_temperature = float(proto_temperature)
 
         # Классификатор
         self._calculate_classifier_input_dim()
@@ -432,35 +441,29 @@ class VideoFormer_with_Prototypes(nn.Module):
 
     def _compute_proto_logits(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: [B, D] — pooled features
-        Возвращает логиты по классам на основе косинусного сходства с прототипами.
+        x: [B, D] pooled features
+        Returns class logits based on proto_similarity ("cosine" or "inv_euclid").
         """
-        # Нормализуем x и прототипы для косинусного сходства
-        x_norm = torch.nn.functional.normalize(x, dim=1)  # [B, D]
-        p_norm = torch.nn.functional.normalize(self.prototypes, dim=1)  # [P, D]
+        B = x.size(0)
+        C = self.num_classes
+        N = self.num_prototypes_per_class
 
-        # Cosine similarity: [B, P]
-        cos_sim = torch.matmul(x_norm, p_norm.t())  # [B, total_prototypes]
+        if self.proto_similarity == "cosine":
+            x_norm = torch.nn.functional.normalize(x, dim=1)  # [B, D]
+            p_norm = torch.nn.functional.normalize(self.prototypes, dim=1)  # [P, D]
+            sim = torch.matmul(x_norm, p_norm.t())  # [B, P]
+        else:
+            dist = torch.cdist(x, self.prototypes, p=2)  # [B, P]
+            sim = 1.0 / (1.0 + dist)
 
-        cos_sim = cos_sim.view(-1, self.num_classes, self.num_prototypes_per_class)  # [B, C, N]
-
-        proto_logits_per_class = cos_sim.max(dim=2).values  # [B, C] — strongest prototype per class
-        # proto_logits_per_class = cos_sim.mean(dim=2)  # [B, C] — strongest prototype per class
-
-        # k = 2  # начать с 2; если не зайдет — 3
-        # topk_vals = cos_sim.topk(k, dim=2).values      # [B, C, k]
-        # proto_logits_per_class = topk_vals.mean(dim=2) # [B, C]
-
+        sim = sim.view(B, C, N)  # [B, C, N]
+        proto_logits_per_class = sim.max(dim=2).values  # [B, C]
+        # proto_logits_per_class = sim.mean(dim=2)  # [B, C]
+        # k = 2
+        # topk_vals = sim.topk(k, dim=2).values      # [B, C, k]
+        # proto_logits_per_class = topk_vals.mean(dim=2)  # [B, C]
 
         proto_logits_per_class = proto_logits_per_class / self.proto_temperature
-
-        # t = self.proto_temperature
-        # n = self.num_prototypes_per_class
-
-        # cos_sim = cos_sim.view(-1, self.num_classes, n)      # [B,C,N]
-        # proto_logits = torch.logsumexp(cos_sim / t, dim=2) - math.log(n)  # [B,C]
-        # return proto_logits
-
         return proto_logits_per_class
 
 

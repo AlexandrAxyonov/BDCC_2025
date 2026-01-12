@@ -19,6 +19,7 @@ from src.models.models import VideoFormer, VideoFormer_with_Archetypes, VideoFor
 from src.utils.logger_setup import color_metric, color_split,dbg_check_logits, dbg_dump_logits
 from src.utils.schedulers import SmartScheduler
 from src.utils.losses import prototype_contrastive_loss, prototype_contrastive_loss_2
+import pickle
 
 CLASS_LABELS = {
     0: "control",
@@ -176,7 +177,9 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
             seg_len=seq_len,
             out_features=cfg.out_features,
             num_classes=num_classes,
-            num_prototypes_per_class=cfg.num_prototypes_per_class
+            num_prototypes_per_class=cfg.num_prototypes_per_class,
+            proto_similarity=getattr(cfg, "proto_similarity", "cosine"),
+            proto_temperature=getattr(cfg, "proto_temperature", 0.1),
         )
     elif model_name == "archetypes":
         model = VideoFormer_with_Archetypes(
@@ -293,6 +296,23 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
                 mask=mask.to(device, non_blocking=True) if mask is not None else None
                 )
             if bidx == 0:
+
+                # 1) использование архетипов в батче
+                K = int(getattr(model, "num_archetypes", getattr(cfg, "num_archetypes", 0)))
+                counts = torch.bincount(idx, minlength=K).detach().cpu()
+                used = int((counts > 0).sum().item())
+                maxc = int(counts.max().item()) if counts.numel() else 0
+                total = int(counts.sum().item()) if counts.numel() else 0
+                max_frac = (maxc / max(1, total))
+
+                logging.info(f"[ARC:VAL] used={used}/{K} max_count={maxc} max_frac={max_frac:.3f}")
+
+                # 2) проверка “не убивает ли маска”
+                if mask is not None:
+                    logging.info(f"[ARC:VAL] mask_mean={mask.float().mean().item():.3f}")
+
+
+
                 dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=7, max_cols=logits.size(1))
         else:
             logits =  model(
@@ -343,6 +363,93 @@ def _score_for_split(metrics_map: Dict[str, float], selection_metric: str) -> fl
         if k in metrics_map and isinstance(metrics_map[k], (int, float)):
             return float(metrics_map[k])
     return -1.0
+
+def _probs_from_logits(logits: torch.Tensor, multi_label: bool) -> torch.Tensor:
+    # single-label: softmax; multi-label: sigmoid
+    return torch.sigmoid(logits) if multi_label else torch.softmax(logits, dim=1)
+
+
+@torch.no_grad()
+def export_logits_to_pkl(
+    cfg,
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    avg_mode: str,
+    model_name: str,      # "prototypes" или "transformer"
+    out_path: str,
+    multi_label: bool,
+    segment_length: int | None,
+):
+    model.eval()
+    out = {}  # dict[video_path] -> dict
+
+    for batch in tqdm(loader, desc=f"Export logits → {out_path}", leave=False):
+        if batch is None:
+            continue
+
+        X, keep, mask = _stack_body_features(batch["features"], avg_mode, segment_length=segment_length)
+        if len(keep) == 0:
+            continue
+
+        # обязательно должны быть (у тебя они есть)
+        if "names" not in batch or "video_paths" not in batch:
+            raise KeyError("export_logits_to_pkl ожидает batch['names'] и batch['video_paths']")
+
+        if X.ndim == 2:
+            X = X.unsqueeze(1)
+
+        names = [str(batch["names"][i]) for i in keep]          # читаемое имя
+        keys  = [str(batch["video_paths"][i]) for i in keep]    # уникальный ключ (путь)
+
+        Xd = X.to(device, non_blocking=True)
+        md = mask.to(device, non_blocking=True) if mask is not None else None
+
+        if model_name == "prototypes":
+            final, cls_l, proto_l, embeddings = model(Xd, mask=md)
+
+            final_v = _probs_from_logits(final,   multi_label)
+            cls_v   = _probs_from_logits(cls_l,   multi_label)
+            proto_v = _probs_from_logits(proto_l, multi_label)
+
+            final_v = final_v.detach().cpu()
+            cls_v   = cls_v.detach().cpu()
+            proto_v = proto_v.detach().cpu()
+            embeddings = embeddings.detach().cpu()
+
+        else:
+            # baseline transformer: берем embeddings после pooling (return_embeddings=True)
+            logits, embeddings = model(Xd, mask=md, return_embeddings=True)
+
+            final_v = _probs_from_logits(logits, multi_label).detach().cpu()
+            embeddings = embeddings.detach().cpu()
+
+            # чтобы "формы совпали" — кладем векторы [C] из NaN
+            C = final_v.size(1)
+            cls_v   = torch.full((final_v.size(0), C), float("nan"))
+            proto_v = torch.full((final_v.size(0), C), float("nan"))
+
+        for i in range(len(keys)):
+            k = keys[i]
+            # защита от перезаписи, если вдруг ключ повторится
+            if k in out:
+                k = f"{k}__dup{i}"
+
+            out[k] = {
+                "name": names[i],
+                "final_prob": final_v[i].numpy().astype(np.float32),
+                "cls_prob":   cls_v[i].numpy().astype(np.float32),
+                "proto_prob": proto_v[i].numpy().astype(np.float32),
+                "embeddings": embeddings[i].numpy().astype(np.float32),
+            }
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "wb") as f:
+        pickle.dump(out, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    logging.info(f"[EXPORT] saved {len(out)} files → {out_path}")
+
+
 
 
 # ───────────────────────── train loop ─────────────────────
@@ -444,7 +551,6 @@ def train(
         criterion = nn.CrossEntropyLoss(weight=ce_weights)
         # criterion = nn.CrossEntropyLoss(weight=ce_weights, label_smoothing=0.05)
 
-
     else:
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
@@ -455,6 +561,7 @@ def train(
     best_score = -1.0
     best_dev, best_test = {}, {}
     patience = 0
+    best_ckpt_path = None
 
     for epoch in range(cfg.num_epochs):
         logging.info(f"═══ EPOCH {epoch+1}/{cfg.num_epochs} ═══")
@@ -510,6 +617,17 @@ def train(
                     mask=mask.to(device, non_blocking=True) if mask is not None else None
                 )
                 if batch_idx == 0:
+
+                    K = int(getattr(model, "num_archetypes", getattr(cfg, "num_archetypes", 0)))
+                    counts = torch.bincount(idx, minlength=K).detach().cpu()
+                    used = int((counts > 0).sum().item())
+                    maxc = int(counts.max().item()) if counts.numel() else 0
+                    total = int(counts.sum().item()) if counts.numel() else 0
+                    max_frac = (maxc / max(1, total))
+                    logging.info(f"[ARC:TRAIN] used={used}/{K} max_count={maxc} max_frac={max_frac:.3f}")
+                    if mask is not None:
+                        logging.info(f"[ARC:TRAIN] mask_mean={mask.float().mean().item():.3f}")
+
                     dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:TRAIN:final]", max_rows=7, max_cols=logits.size(1))
             else:
                 logits =  model(
@@ -525,7 +643,9 @@ def train(
             if cfg.model_name.lower() == 'prototypes':
                 cont_loss = prototype_contrastive_loss(
                     embeddings, y, model.prototypes,
-                    num_classes=model.num_classes, temperature=0.1
+                    num_classes=model.num_classes,
+                    temperature=getattr(cfg, "proto_temperature", 0.1),
+                    similarity=getattr(cfg, "proto_similarity", "cosine"),
                 )
 
                 alpha = cfg.prototype_alpha  # можно настраивать
@@ -626,11 +746,38 @@ def train(
             os.makedirs(cfg.checkpoint_dir, exist_ok=True)
             ckpt = Path(cfg.checkpoint_dir) / f"best_ep{epoch+1}_{early_stop_on}_{selection_metric}_{best_score:.4f}.pt"
             torch.save(model.state_dict(), ckpt)
+            best_ckpt_path = str(ckpt)
             logging.info(f"✔ Saved best model ({early_stop_on}/{selection_metric}={best_score:.4f}): {ckpt.name}")
         else:
             patience += 1
             if patience >= cfg.max_patience:
                 logging.info("Early stopping.")
                 break
+
+    # ===== ONE-TIME EXPORT AFTER TRAIN =====
+    EXPORT_DIR = "pkl_logits"
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+
+    if best_ckpt_path is not None:
+        state = torch.load(best_ckpt_path, map_location=device)
+        model.load_state_dict(state)
+        model.eval()
+
+        # выбирай куда экспортить: test_loaders или dev_loaders
+        if test_loaders:
+            for split_name, ldr in test_loaders.items():
+                out_path = os.path.join(EXPORT_DIR, f"{cfg.model_name.lower()}_{split_name}_best.pkl")
+                export_logits_to_pkl(
+                    cfg=cfg,
+                    model=model,
+                    loader=ldr,
+                    device=device,
+                    avg_mode=avg_mode,
+                    model_name=cfg.model_name.lower(),
+                    out_path=out_path,
+                    multi_label=multi_label,
+                    segment_length=cfg.segment_length,
+                )
+    # ======================================
 
     return best_dev, best_test

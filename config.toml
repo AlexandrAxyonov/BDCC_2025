@@ -46,15 +46,17 @@ add_similarity = true     # считает косинусное сходство
 class_weighting = "balanced" # "none"
 num_prototypes_per_class = 9
 prototype_alpha = 0.05
+proto_similarity = "inv_euclid" # "cosine" "inv_euclid"
+proto_temperature = 0.1
 num_archetypes = 9
-print_logits = true
+print_logits = false
 
 # ---------------------------
 # Параметры модели
 # ---------------------------
 [train.model]
-# какую модель используем: "mamba" или "transformer" prototypes archetypes
-model_name            = "archetypes"
+# какую модель используем: "mamba" или "prototypes" prototypes archetypes
+model_name            = "prototypes"
 multi_label = false
 thr_dep = 0.5
 thr_park = 0.5
@@ -65,7 +67,7 @@ dropout               = 0.25     # dropout между слоями
 gate_mode             = "none"   #  t , d
 
 # ---- параметры для VideoFormer ----
-num_transformer_heads = 8        # количество attention голов в трансформере
+num_transformer_heads = 2      # количество attention голов в трансформере
 positional_encoding   = false    # использовать ли позиционное кодирование
 tr_layers             = 5        # число transformer-блоков
 
