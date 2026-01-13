@@ -178,9 +178,12 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
             out_features=cfg.out_features,
             num_classes=num_classes,
             num_prototypes_per_class=cfg.num_prototypes_per_class,
-            proto_similarity=getattr(cfg, "proto_similarity", "cosine"),
-            proto_temperature=getattr(cfg, "proto_temperature", 0.1),
+            proto_similarity=cfg.proto_similarity,
+            proto_temperature=cfg.proto_temperature,
+            proto_proj_enabled=getattr(cfg, "proto_proj_enabled", False),
+            proto_proj_dim=getattr(cfg, "proto_proj_dim", 0),
         )
+
     elif model_name == "archetypes":
         model = VideoFormer_with_Archetypes(
             input_dim=input_dim,
@@ -248,6 +251,7 @@ def _map_probs_to_single_label(p_dep: np.ndarray, p_park: np.ndarray,
     return y
 
 
+
 @torch.no_grad()
 def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
             avg_mode: str, metrics_num_classes: int, model_name: str,
@@ -276,6 +280,7 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
             X = X.unsqueeze(1)  # → [B,1,D’]
 
         # logits = model(X.to(device))  # [B,C]
+
         if model_name == 'prototypes':
             final, cls_l, proto_l, embeddings = model(
                 X.to(device, non_blocking=True),
@@ -604,6 +609,7 @@ def train(
                 )
                 # logits = cls_l
                 logits = final
+                loss = criterion(logits, y)
 
                 if batch_idx == 0:  # печатаем один раз за эпоху
                     dbg_dump_logits(final, cfg.print_logits,   prefix="[DBG:TRAIN:final]", max_rows=5, max_cols=final.size(1))
@@ -629,6 +635,7 @@ def train(
                         logging.info(f"[ARC:TRAIN] mask_mean={mask.float().mean().item():.3f}")
 
                     dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:TRAIN:final]", max_rows=7, max_cols=logits.size(1))
+                loss = criterion(logits, y)
             else:
                 logits =  model(
                     X.to(device, non_blocking=True),
@@ -637,12 +644,13 @@ def train(
                 if batch_idx == 0:
                     # _dbg_check_logits(cls_logits=logits, prefix="[DBG:TRAIN]")
                     dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:TRAIN:final]", max_rows=5, max_cols=logits.size(1))
-
-            loss = criterion(logits, y)
+                loss = criterion(logits, y)
 
             if cfg.model_name.lower() == 'prototypes':
+                proto_emb = model._proto_project(embeddings)
+                proto_bank = model._proto_project(model.prototypes)
                 cont_loss = prototype_contrastive_loss(
-                    embeddings, y, model.prototypes,
+                    proto_emb, y, proto_bank,
                     num_classes=model.num_classes,
                     temperature=getattr(cfg, "proto_temperature", 0.1),
                     similarity=getattr(cfg, "proto_similarity", "cosine"),
@@ -763,7 +771,6 @@ def train(
         model.load_state_dict(state)
         model.eval()
 
-        # выбирай куда экспортить: test_loaders или dev_loaders
         if test_loaders:
             for split_name, ldr in test_loaders.items():
                 out_path = os.path.join(EXPORT_DIR, f"{cfg.model_name.lower()}_{split_name}_best.pkl")

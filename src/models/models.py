@@ -336,6 +336,8 @@ class VideoFormer_with_Prototypes(nn.Module):
         num_prototypes_per_class: int = 3,
         proto_similarity: str = "cosine",
         proto_temperature: float = 0.1,
+        proto_proj_enabled: bool = False,
+        proto_proj_dim: int | None = None,
     ):
         super(VideoFormer_with_Prototypes, self).__init__()
 
@@ -381,6 +383,16 @@ class VideoFormer_with_Prototypes(nn.Module):
         self.class_mix_weights = nn.Parameter(torch.ones(num_classes) * 0.5)  # начальное значение 0.5
 
         self.proto_temperature = float(proto_temperature)
+        self.proto_proj_enabled = bool(proto_proj_enabled)
+        proj_dim = self.hidden_dim if proto_proj_dim is None else int(proto_proj_dim)
+        if proj_dim <= 0:
+            proj_dim = self.hidden_dim
+        self.proto_proj_dim = proj_dim
+        self.proto_proj = (
+            nn.Linear(self.hidden_dim, self.proto_proj_dim, bias=False)
+            if self.proto_proj_enabled
+            else nn.Identity()
+        )
 
         # Классификатор
         self._calculate_classifier_input_dim()
@@ -393,6 +405,11 @@ class VideoFormer_with_Prototypes(nn.Module):
         )
 
         self._init_weights()
+        if self.proto_proj_enabled:
+            if self.proto_proj_dim == self.hidden_dim:
+                nn.init.eye_(self.proto_proj.weight)
+            else:
+                nn.init.xavier_uniform_(self.proto_proj.weight)
 
     def forward(self, sequences: torch.Tensor, mask: torch.Tensor | None = None):
 
@@ -439,6 +456,9 @@ class VideoFormer_with_Prototypes(nn.Module):
         # return final_logits, classifier_logits, proto_logits, sequences_pool
         return final_logits, classifier_logits, proto_logits, sequences_pool
 
+    def _proto_project(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proto_proj(x)
+
     def _compute_proto_logits(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: [B, D] pooled features
@@ -448,12 +468,17 @@ class VideoFormer_with_Prototypes(nn.Module):
         C = self.num_classes
         N = self.num_prototypes_per_class
 
+        x = self._proto_project(x)
+        protos = self._proto_project(self.prototypes)
+
         if self.proto_similarity == "cosine":
-            x_norm = torch.nn.functional.normalize(x, dim=1)  # [B, D]
-            p_norm = torch.nn.functional.normalize(self.prototypes, dim=1)  # [P, D]
+            x_norm = torch.nn.functional.normalize(x, dim=1)  # [B, D']
+            p_norm = torch.nn.functional.normalize(protos, dim=1)  # [P, D']
             sim = torch.matmul(x_norm, p_norm.t())  # [B, P]
         else:
-            dist = torch.cdist(x, self.prototypes, p=2)  # [B, P]
+            x_norm = torch.nn.functional.normalize(x, dim=1)  # [B, D']
+            p_norm = torch.nn.functional.normalize(protos, dim=1)  # [P, D']
+            dist = torch.cdist(x_norm, p_norm, p=2)  # [B, P]
             sim = 1.0 / (1.0 + dist)
 
         sim = sim.view(B, C, N)  # [B, C, N]

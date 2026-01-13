@@ -46,8 +46,10 @@ add_similarity = true     # считает косинусное сходство
 class_weighting = "balanced" # "none"
 num_prototypes_per_class = 9
 prototype_alpha = 0.05
-proto_similarity = "inv_euclid" # "cosine" "inv_euclid"
+proto_similarity = "cosine" # "cosine" "inv_euclid"
 proto_temperature = 0.1
+proto_proj_enabled = false
+proto_proj_dim = 256  # 0 = тот же размер, что hidden_dim
 num_archetypes = 9
 print_logits = false
 

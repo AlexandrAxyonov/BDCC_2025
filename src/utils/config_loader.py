@@ -57,6 +57,8 @@ class ConfigLoader:
         self.prototype_alpha = train_general.get("prototype_alpha", 1)
         self.proto_similarity = train_general.get("proto_similarity", "cosine")
         self.proto_temperature = train_general.get("proto_temperature", 0.1)
+        self.proto_proj_enabled = train_general.get("proto_proj_enabled", False)
+        self.proto_proj_dim = train_general.get("proto_proj_dim", 0)
         self.num_archetypes = train_general.get("num_archetypes", 1)
         self.print_logits = train_general.get("print_logits", False)
 
