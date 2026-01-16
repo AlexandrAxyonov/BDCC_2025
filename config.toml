@@ -44,12 +44,16 @@ device = "cuda"           # "cuda" или "cpu", куда грузить мод�
 selection_metric = "UAR"   # по какой метрике отслеживаем
 add_similarity = true     # считает косинусное сходство эмбеддингов модальностей (или эмбеддинга к некоторому «гайд-банку»/прототипам классов). Используется в MultiModalFusionModel
 class_weighting = "balanced" # "none"
+single_task = "depression"        # "none" | "depression" | "parkinson"
 num_prototypes_per_class = 9
 prototype_alpha = 0.05
+loss_final_weight = 1.0
+loss_cls_weight = 0.0
+loss_proto_weight = 0.0
 proto_similarity = "cosine" # "cosine" "inv_euclid"
 proto_temperature = 0.1
 proto_proj_enabled = false
-proto_proj_dim = 256  # 0 = тот же размер, что hidden_dim
+proto_proj_dim = 0  # 0 = тот же размер, что hidden_dim
 num_archetypes = 9
 print_logits = false
 
@@ -57,8 +61,8 @@ print_logits = false
 # Параметры модели
 # ---------------------------
 [train.model]
-# какую модель используем: "mamba" или "prototypes" prototypes archetypes
-model_name            = "prototypes"
+# какую модель используем: "mamba" или "prototypes" transformer archetypes
+model_name            = "transformer"
 multi_label = false
 thr_dep = 0.5
 thr_park = 0.5
@@ -66,10 +70,10 @@ thr_park = 0.5
 hidden_dim            = 128      # размер скрытого состояния
 out_features          = 512      # размер финальных признаков перед классификацией
 dropout               = 0.25     # dropout между слоями
-gate_mode             = "none"   #  t , d
+gate_mode             = "none"   #  t , d,  none
 
 # ---- параметры для VideoFormer ----
-num_transformer_heads = 2      # количество attention голов в трансформере
+num_transformer_heads = 8      # количество attention голов в трансформере
 positional_encoding   = false    # использовать ли позиционное кодирование
 tr_layers             = 5        # число transformer-блоков
 

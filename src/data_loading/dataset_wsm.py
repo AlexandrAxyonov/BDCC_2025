@@ -43,6 +43,12 @@ class WSMBodyDataset(Dataset):
         self.device     = device
 
         self.multi_label: bool = bool(getattr(self.config, "multi_label", False))
+        self.single_task: str = str(getattr(self.config, "single_task", "none") or "none").lower()
+        self.meta_store_name = (
+            f"{self.dataset_name}__{self.single_task}"
+            if self.single_task not in {"none", ""}
+            else self.dataset_name
+        )
 
         # параметры извлечения
         self.segment_length   = config.segment_length
@@ -84,13 +90,13 @@ class WSMBodyDataset(Dataset):
         self.meta: List[Dict[str, Any]] = []
         if self.save_prepared_data:
             self.meta = self.store.load_meta(
-                self.dataset_name, self.split, getattr(self.config, "random_seed", 0), self.subset_size
+                self.meta_store_name, self.split, getattr(self.config, "random_seed", 0), self.subset_size
             )
         if not self.meta:
             self._build_meta_only()
             if self.save_prepared_data:
                 self.store.save_meta(
-                    self.dataset_name, self.split, getattr(self.config, "random_seed", 0),
+                    self.meta_store_name, self.split, getattr(self.config, "random_seed", 0),
                     self.subset_size, self.meta
                 )
 
@@ -110,6 +116,10 @@ class WSMBodyDataset(Dataset):
 
     def _map_label(self, raw: int) -> int:
         raw = int(raw)
+        if self.single_task.startswith("dep"):
+            return 1 if raw == 1 else 0
+        if self.single_task.startswith("park"):
+            return 1 if raw == 1 else 0
         if self.corpus == "depression":
             return 1 if raw == 1 else 0
         if self.corpus == "parkinson":

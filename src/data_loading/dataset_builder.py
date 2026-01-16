@@ -67,8 +67,20 @@ def make_wsm_dataset_and_loader(config, split: str) -> Tuple[ConcatDataset, Data
       base_dir, csv_path, video_dir (с шаблонами {base_dir} и {split})
     """
     ds_list = []
+    single_task = str(getattr(config, "single_task", "none") or "none").lower()
+    def _match_single_task(name: str) -> bool:
+        if single_task in {"none", ""}:
+            return True
+        n = name.lower()
+        if single_task.startswith("dep"):
+            return "depress" in n
+        if single_task.startswith("park"):
+            return "parkinson" in n
+        return True
     for ds_name, ds_cfg in getattr(config, "datasets", {}).items():
         if not ds_name.lower().startswith("wsm_"):
+            continue
+        if not _match_single_task(ds_name):
             continue
         csv_path  = ds_cfg["csv_path"].format(base_dir=ds_cfg["base_dir"], split=split)
         video_dir = ds_cfg["video_dir"].format(base_dir=ds_cfg["base_dir"], split=split)

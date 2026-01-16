@@ -504,7 +504,19 @@ def train(
             model_num_classes = cfg.num_classes
         except AttributeError:
             model_num_classes = _num_classes_from_loader(mm_loader, avg_mode, segment_length=cfg.segment_length)
-        metrics_num_classes = model_num_classes
+        single_task = str(getattr(cfg, "single_task", "none") or "none").lower()
+        global CLASS_LABELS
+        if single_task.startswith("dep"):
+            CLASS_LABELS = {0: "control", 1: "depression"}
+            model_num_classes = 2
+            metrics_num_classes = 2
+        elif single_task.startswith("park"):
+            CLASS_LABELS = {0: "control", 1: "parkinson"}
+            model_num_classes = 2
+            metrics_num_classes = 2
+        else:
+            CLASS_LABELS = {0: "control", 1: "depression", 2: "parkinson"}
+            metrics_num_classes = model_num_classes
 
     # ─── class weights / pos_weight ─────────────────────────────────────
     if not multi_label:
@@ -609,7 +621,17 @@ def train(
                 )
                 # logits = cls_l
                 logits = final
-                loss = criterion(logits, y)
+                w_final = float(getattr(cfg, "loss_final_weight", 1.0))
+                w_cls = float(getattr(cfg, "loss_cls_weight", 0.0))
+                w_proto = float(getattr(cfg, "loss_proto_weight", 0.0))
+                loss_terms = []
+                if w_final != 0.0:
+                    loss_terms.append(w_final * criterion(final, y))
+                if w_cls != 0.0:
+                    loss_terms.append(w_cls * criterion(cls_l, y))
+                if w_proto != 0.0:
+                    loss_terms.append(w_proto * criterion(proto_l, y))
+                loss = sum(loss_terms) if loss_terms else torch.zeros((), device=final.device)
 
                 if batch_idx == 0:  # печатаем один раз за эпоху
                     dbg_dump_logits(final, cfg.print_logits,   prefix="[DBG:TRAIN:final]", max_rows=5, max_cols=final.size(1))
@@ -770,6 +792,38 @@ def train(
         state = torch.load(best_ckpt_path, map_location=device)
         model.load_state_dict(state)
         model.eval()
+
+        # train export
+        out_path = os.path.join(EXPORT_DIR, f"{cfg.model_name.lower()}_train_best.pkl")
+        export_logits_to_pkl(
+            cfg=cfg,
+            model=model,
+            loader=mm_loader,
+            device=device,
+            avg_mode=avg_mode,
+            model_name=cfg.model_name.lower(),
+            out_path=out_path,
+            multi_label=multi_label,
+            segment_length=cfg.segment_length,
+        )
+
+        # dev export
+        if dev_loaders:
+            for split_name, ldr in dev_loaders.items():
+                out_path = os.path.join(
+                    EXPORT_DIR, f"{cfg.model_name.lower()}_dev_{split_name}_best.pkl"
+                )
+                export_logits_to_pkl(
+                    cfg=cfg,
+                    model=model,
+                    loader=ldr,
+                    device=device,
+                    avg_mode=avg_mode,
+                    model_name=cfg.model_name.lower(),
+                    out_path=out_path,
+                    multi_label=multi_label,
+                    segment_length=cfg.segment_length,
+                )
 
         if test_loaders:
             for split_name, ldr in test_loaders.items():
