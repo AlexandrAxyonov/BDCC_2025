@@ -149,15 +149,13 @@ class VideoFormer(nn.Module):
         elif self.gate_mode == "t":
             # global по батчу, по времени
             W_t = self.t_gates[layer_idx]                       # [T, 1]
-            # alpha_t = torch.sigmoid(W_t.squeeze(-1))           # [T]
             alpha_t = torch.softmax(W_t.squeeze(-1), dim=0)     # [T]
             alpha = alpha_t.view(1, T, 1)                       # [1, T, 1]
 
         elif self.gate_mode == "d":
             # global по батчу, по фичам
             W_d = self.d_gates[layer_idx]                       # [D]
-            # alpha_d = torch.softmax(W_d, dim=0)                 # [D]
-            alpha_d = torch.sigmoid(W_d.squeeze(-1))           # [T]
+            alpha_d = torch.softmax(W_d, dim=0)                 # [D]
             alpha = alpha_d.view(1, 1, D)                       # [1, 1, D]
 
         else:

@@ -43,6 +43,7 @@ class WSMBodyDataset(Dataset):
         self.device     = device
 
         self.multi_label: bool = bool(getattr(self.config, "multi_label", False))
+        self.multi_label_mode: str = str(getattr(self.config, "multi_label_mode", "2way") or "2way")
         self.single_task: str = str(getattr(self.config, "single_task", "none") or "none").lower()
         self.meta_store_name = (
             f"{self.dataset_name}__{self.single_task}"
@@ -163,17 +164,22 @@ class WSMBodyDataset(Dataset):
 
     def _to_multi_label_vec(self, class_id: int) -> torch.Tensor:
         """
-        Маппинг single-label класса в 2-мерный multi-label вектор [dep, park]:
-          0 (control)   -> [0., 0.]
-          1 (depression)-> [1., 0.]
-          2 (parkinson) -> [0., 1.]
+        2way: [dep, park] where control -> [0,0]
+        onehot3: [control, dep, park]
         """
+        mode = self.multi_label_mode.strip().lower()
+        if mode in {"onehot3", "3way", "3", "onehot"}:
+            if class_id == 0:
+                return torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+            if class_id == 1:
+                return torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+            return torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
+
         if class_id == 1:
             return torch.tensor([1.0, 0.0], dtype=torch.float32)
         if class_id == 2:
             return torch.tensor([0.0, 1.0], dtype=torch.float32)
         return torch.tensor([0.0, 0.0], dtype=torch.float32)
-
     # ─────────────────── feature caching ─────────────────── #
 
     def _prepare_body_cache(self) -> None:
@@ -279,6 +285,6 @@ class WSMBodyDataset(Dataset):
             "features": features,
         }
         if self.multi_label:
-            out["label_ml"] = self._to_multi_label_vec(label_idx)  # float32, форма [2]
+            out["label_ml"] = self._to_multi_label_vec(label_idx)  # float32, shape [2] or [3]
 
         return out

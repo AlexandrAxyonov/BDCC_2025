@@ -183,4 +183,5 @@ modules/
 hub/
 features*/
 checkpoints
-pkl_logits/
+pkl_logits*/
+notebooks/

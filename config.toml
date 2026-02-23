@@ -44,7 +44,7 @@ device = "cuda"           # "cuda" или "cpu", куда грузить мод�
 selection_metric = "UAR"   # по какой метрике отслеживаем
 add_similarity = true     # считает косинусное сходство эмбеддингов модальностей (или эмбеддинга к некоторому «гайд-банку»/прототипам классов). Используется в MultiModalFusionModel
 class_weighting = "balanced" # "none"
-single_task = "depression"        # "none" | "depression" | "parkinson"
+single_task = "parkinson"        # "none" | "depression" | "parkinson"
 num_prototypes_per_class = 9
 prototype_alpha = 0.05
 loss_final_weight = 1.0
@@ -56,6 +56,7 @@ proto_proj_enabled = false
 proto_proj_dim = 0  # 0 = тот же размер, что hidden_dim
 num_archetypes = 9
 print_logits = false
+export_logits_raw = false   # true -> save raw logits instead of probs in pkl
 
 # ---------------------------
 # Параметры модели
@@ -64,6 +65,7 @@ print_logits = false
 # какую модель используем: "mamba" или "prototypes" transformer archetypes
 model_name            = "transformer"
 multi_label = false
+multi_label_mode = "onehot3"  # "2way" (dep/park -> control via thresholds) | "onehot3"
 thr_dep = 0.5
 thr_park = 0.5
 
@@ -73,9 +75,9 @@ dropout               = 0.25     # dropout между слоями
 gate_mode             = "none"   #  t , d,  none
 
 # ---- параметры для VideoFormer ----
-num_transformer_heads = 8      # количество attention голов в трансформере
+num_transformer_heads = 2      # количество attention голов в трансформере
 positional_encoding   = false    # использовать ли позиционное кодирование
-tr_layers             = 5        # число transformer-блоков
+tr_layers             = 2        # число transformer-блоков
 
 # ---- параметры для VideoMamba ----
 mamba_d_state         = 6        # внутреннее состояние mamba

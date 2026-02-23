@@ -26,6 +26,7 @@ CLASS_LABELS = {
     1: "depression",
     2: "parkinson",
 }
+ML_ONEHOT3 = {"onehot3", "3way", "3", "onehot"}
 
 # ───────────────────────── utils ─────────────────────────
 
@@ -125,9 +126,10 @@ def _num_classes_from_loader(loader: DataLoader, average_mode: str, segment_leng
 
 def _metrics(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> Dict[str, float]:
     mf1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    wf1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
     uar = recall_score(y_true, y_pred, average="macro", zero_division=0)  # UAR = macro recall
     per_cls = recall_score(y_true, y_pred, average=None, labels=list(range(num_classes)), zero_division=0)
-    out: Dict[str, float] = {"MF1": float(mf1), "UAR": float(uar)}
+    out: Dict[str, float] = {"MF1": float(mf1), "WF1": float(wf1), "UAR": float(uar)}
     for c, r in enumerate(per_cls):
         name = CLASS_LABELS.get(c, f"class{c}")
         out[f"recall_c{c}_{name}"] = float(r)
@@ -208,21 +210,27 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
 
 def _gather_pos_weight_for_ml(loader: DataLoader, average_mode: str, segment_length: Optional[int] = None) -> torch.Tensor:
     """
-    Считает pos_weight для BCE по двум головам: N_neg/N_pos на трейне.
-    Ожидает, что в батче есть 'labels_ml': FloatTensor[B,2].
+    pos_weight per class: N_neg / N_pos for each column of labels_ml.
     """
-    pos = torch.zeros(2, dtype=torch.float64)
-    neg = torch.zeros(2, dtype=torch.float64)
+    pos = None
+    neg = None
     for batch in loader:
         if batch is None or "labels_ml" not in batch:
             continue
         _, keep, _ = _stack_body_features(batch["features"], average_mode, segment_length=segment_length)
-        y_ml = batch["labels_ml"][keep]  # [b,2]
+        y_ml = batch["labels_ml"][keep]
+        if y_ml.numel() == 0:
+            continue
+        if pos is None:
+            pos = torch.zeros(y_ml.size(1), dtype=torch.float64)
+            neg = torch.zeros_like(pos)
         pos += y_ml.double().sum(dim=0)
         neg += (1.0 - y_ml.double()).sum(dim=0)
+    if pos is None:
+        raise RuntimeError("labels_ml not found for pos_weight calculation")
     pos = torch.clamp(pos, min=1.0)
     neg = torch.clamp(neg, min=1.0)
-    return (neg / pos).to(torch.float32)  # shape [2]
+    return (neg / pos).to(torch.float32)
 
 
 def _map_probs_to_single_label(p_dep: np.ndarray, p_park: np.ndarray,
@@ -264,6 +272,7 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
       - multi-label:  3 (після маппинга двух голов в 3 класса)
     """
     model.eval()
+    ml_mode = str(getattr(cfg, "multi_label_mode", "2way") or "2way").lower()
     all_y, all_p = [], []
 
     # for batch in tqdm(loader, desc="Eval", leave=False):
@@ -332,11 +341,14 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
         if not multi_label:
             pred = logits.argmax(dim=1)
         else:
-            # C=2: dep, park → сигмоида + пороги → маппинг в 3 класса
-            probs = torch.sigmoid(logits).cpu().numpy()           # [B,2]
-            y_hat = _map_probs_to_single_label(probs[:, 0], probs[:, 1],
-                                               t_dep=thr_dep, t_park=thr_park)
-            pred = torch.as_tensor(y_hat, dtype=torch.long)
+            if ml_mode in ML_ONEHOT3:
+                pred = logits.argmax(dim=1)
+            else:
+                # C=2: dep, park -> map to 3-class label
+                probs = torch.sigmoid(logits).cpu().numpy()           # [B,2]
+                y_hat = _map_probs_to_single_label(probs[:, 0], probs[:, 1],
+                                                   t_dep=thr_dep, t_park=thr_park)
+                pred = torch.as_tensor(y_hat, dtype=torch.long)
 
         all_y.append(y.cpu())
         all_p.append(pred.cpu())
@@ -388,6 +400,7 @@ def export_logits_to_pkl(
 ):
     model.eval()
     out = {}  # dict[video_path] -> dict
+    export_raw = bool(getattr(cfg, "export_logits_raw", False))
 
     for batch in tqdm(loader, desc=f"Export logits → {out_path}", leave=False):
         if batch is None:
@@ -413,9 +426,14 @@ def export_logits_to_pkl(
         if model_name == "prototypes":
             final, cls_l, proto_l, embeddings = model(Xd, mask=md)
 
-            final_v = _probs_from_logits(final,   multi_label)
-            cls_v   = _probs_from_logits(cls_l,   multi_label)
-            proto_v = _probs_from_logits(proto_l, multi_label)
+            if export_raw:
+                final_v = final
+                cls_v   = cls_l
+                proto_v = proto_l
+            else:
+                final_v = _probs_from_logits(final,   multi_label)
+                cls_v   = _probs_from_logits(cls_l,   multi_label)
+                proto_v = _probs_from_logits(proto_l, multi_label)
 
             final_v = final_v.detach().cpu()
             cls_v   = cls_v.detach().cpu()
@@ -426,7 +444,10 @@ def export_logits_to_pkl(
             # baseline transformer: берем embeddings после pooling (return_embeddings=True)
             logits, embeddings = model(Xd, mask=md, return_embeddings=True)
 
-            final_v = _probs_from_logits(logits, multi_label).detach().cpu()
+            if export_raw:
+                final_v = logits.detach().cpu()
+            else:
+                final_v = _probs_from_logits(logits, multi_label).detach().cpu()
             embeddings = embeddings.detach().cpu()
 
             # чтобы "формы совпали" — кладем векторы [C] из NaN
@@ -440,13 +461,22 @@ def export_logits_to_pkl(
             if k in out:
                 k = f"{k}__dup{i}"
 
-            out[k] = {
-                "name": names[i],
-                "final_prob": final_v[i].numpy().astype(np.float32),
-                "cls_prob":   cls_v[i].numpy().astype(np.float32),
-                "proto_prob": proto_v[i].numpy().astype(np.float32),
-                "embeddings": embeddings[i].numpy().astype(np.float32),
-            }
+            if export_raw:
+                out[k] = {
+                    "name": names[i],
+                    "final_logits": final_v[i].numpy().astype(np.float32),
+                    "cls_logits":   cls_v[i].numpy().astype(np.float32),
+                    "proto_logits": proto_v[i].numpy().astype(np.float32),
+                    "embeddings": embeddings[i].numpy().astype(np.float32),
+                }
+            else:
+                out[k] = {
+                    "name": names[i],
+                    "final_prob": final_v[i].numpy().astype(np.float32),
+                    "cls_prob":   cls_v[i].numpy().astype(np.float32),
+                    "proto_prob": proto_v[i].numpy().astype(np.float32),
+                    "embeddings": embeddings[i].numpy().astype(np.float32),
+                }
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "wb") as f:
@@ -474,6 +504,7 @@ def train(
     device = torch.device(cfg.device)
     avg_mode = cfg.average_features.lower()
     multi_label = bool(getattr(cfg, "multi_label", False))
+    ml_mode = str(getattr(cfg, "multi_label_mode", "2way") or "2way").lower()
 
 
     first = None
@@ -497,7 +528,10 @@ def train(
     # model_num_classes: 3 (single) / 2 (multi)
     # metrics_num_classes: всегда 3 (control, depression, parkinson)
     if multi_label:
-        model_num_classes = 2
+        if ml_mode in ML_ONEHOT3:
+            model_num_classes = 3
+        else:
+            model_num_classes = 2
         metrics_num_classes = 3
     else:
         try:
@@ -536,6 +570,9 @@ def train(
 
     # модель/опт/лосс
     model = _build_model(cfg, in_dim, seq_len, model_num_classes, device)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info(f"[MODEL] params total={total_params:,} trainable={trainable_params:,}")
 
     # ─── Оптимизатор ──────────────────────────────────────────────────
     if cfg.optimizer == "adam":
@@ -594,12 +631,13 @@ def train(
 
 
             # таргеты
+            y_idx = _filter_labels(batch["labels"], keep).to(device)
             if not multi_label:
-                y = _filter_labels(batch["labels"], keep).to(device)  # [b]
+                y = y_idx
             else:
                 if "labels_ml" not in batch:
-                    raise RuntimeError("multi_label=True, но в батче нет 'labels_ml'. Проверь датасет/коллатер.")
-                y = batch["labels_ml"][keep].to(device)               # [b,2] float32
+                    raise RuntimeError("multi_label=True, but batch has no 'labels_ml'. Check dataset/collate.")
+                y = batch["labels_ml"][keep].to(device)
 
             if X.ndim == 2:
                 X = X.unsqueeze(1)  # [B,1,D’]
@@ -672,7 +710,7 @@ def train(
                 proto_emb = model._proto_project(embeddings)
                 proto_bank = model._proto_project(model.prototypes)
                 cont_loss = prototype_contrastive_loss(
-                    proto_emb, y, proto_bank,
+                    proto_emb, y_idx, proto_bank,
                     num_classes=model.num_classes,
                     temperature=getattr(cfg, "proto_temperature", 0.1),
                     similarity=getattr(cfg, "proto_similarity", "cosine"),
@@ -696,18 +734,20 @@ def train(
 
             # онлайновые train-метрики (в single — argmax, в multi — маппинг в 3 класса с порогами по умолчанию)
             if not multi_label:
-                tr_y.append(_filter_labels(batch["labels"], keep).cpu())
+                tr_y.append(y_idx.cpu())
                 tr_p.append(logits.argmax(dim=1).detach().cpu())
             else:
-                # целевые метки для отчёта — single-label индексы (0/1/2)
-                tr_y.append(_filter_labels(batch["labels"], keep).cpu())
-                probs = torch.sigmoid(logits).detach().cpu().numpy()
-                y_hat = _map_probs_to_single_label(
-                    probs[:, 0], probs[:, 1],
-                    t_dep=getattr(cfg, "thr_dep", 0.5),
-                    t_park=getattr(cfg, "thr_park", 0.5)
-                )
-                tr_p.append(torch.as_tensor(y_hat, dtype=torch.long))
+                tr_y.append(y_idx.cpu())
+                if ml_mode in ML_ONEHOT3:
+                    tr_p.append(logits.argmax(dim=1).detach().cpu())
+                else:
+                    probs = torch.sigmoid(logits).detach().cpu().numpy()
+                    y_hat = _map_probs_to_single_label(
+                        probs[:, 0], probs[:, 1],
+                        t_dep=getattr(cfg, "thr_dep", 0.5),
+                        t_park=getattr(cfg, "thr_park", 0.5)
+                    )
+                    tr_p.append(torch.as_tensor(y_hat, dtype=torch.long))
 
         train_loss = tot_loss / max(1, tot_n)
         tr_y_np = torch.cat(tr_y).numpy() if tr_y else np.array([])
@@ -718,6 +758,7 @@ def train(
                 f"Loss={train_loss:.4f}",
                 color_metric("UAR", m_tr["UAR"]),
                 color_metric("MF1", m_tr["MF1"]),
+                color_metric("WF1", m_tr["WF1"]),
             ]
             for c in range(metrics_num_classes):
                 key = f"recall_c{c}_{CLASS_LABELS.get(c, f'class{c}')}"

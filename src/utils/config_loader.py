@@ -65,6 +65,7 @@ class ConfigLoader:
         self.proto_proj_dim = train_general.get("proto_proj_dim", 0)
         self.num_archetypes = train_general.get("num_archetypes", 1)
         self.print_logits = train_general.get("print_logits", False)
+        self.export_logits_raw = train_general.get("export_logits_raw", False)
 
         # ---------------------------
         # Тренировка: параметры модели
@@ -74,6 +75,7 @@ class ConfigLoader:
         # общее
         self.model_name = train_model.get("model_name", "mamba")  # "mamba" или "transformer"
         self.multi_label = train_model.get("multi_label", False)
+        self.multi_label_mode = train_model.get("multi_label_mode", "2way")
         self.thr_dep = train_model.get("thr_dep", 0.5)  # "mamba" или "transformer"
         self.thr_park = train_model.get("thr_park", 0.5)  # "mamba" или "transformer"
 

@@ -28,7 +28,7 @@ def wsm_collate_fn(batch: List[Dict[str, Any]]):
         dim=0
     )
 
-    # multi-label : FloatTensor[B, 2] — добавляем ТОЛЬКО если у всех элементов он есть
+    # multi-label : FloatTensor[B, 2] or [B, 3] — добавляем ТОЛЬКО если у всех элементов он есть
     has_ml = all(("label_ml" in b) and (b["label_ml"] is not None) for b in batch)
     if has_ml:
         labels_ml = torch.stack(
@@ -52,7 +52,7 @@ def wsm_collate_fn(batch: List[Dict[str, Any]]):
         "features": features,
     }
     if has_ml:
-        out["labels_ml"] = labels_ml  # FloatTensor[B, 2]
+        out["labels_ml"] = labels_ml  # FloatTensor[B, 2] or [B, 3]
 
     return out
 
