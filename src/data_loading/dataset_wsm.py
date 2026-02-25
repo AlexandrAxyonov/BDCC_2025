@@ -13,13 +13,6 @@ from src.utils.feature_store import FeatureStore, build_cache_key, need_full_ree
 
 
 class WSMBodyDataset(Dataset):
-    """
-    Сегмент = независимое видео.
-    CSV обязан содержать колонки: video_id, diagnosis, segment_file.
-    Пути к сегментам считаются по шаблону:
-        <video_dir>/<video_id>/segments/<segment_file>
-    где video_dir указывается в config.toml (например: E:/WSM/depression/{split}_labels).
-    """
 
     def __init__(
         self,
@@ -27,14 +20,14 @@ class WSMBodyDataset(Dataset):
         video_dir: str,
         config,
         split: str,
-        modality_processors: Dict[str, Any],         # должен содержать 'body'
-        modality_feature_extractors: Dict[str, Any], # должен содержать 'body'
+        modality_processors: Dict[str, Any],
+        modality_feature_extractors: Dict[str, Any],
         dataset_name: str = "wsm",
         device: str = "cuda",
     ) -> None:
         super().__init__()
 
-        # базовые поля
+
         self.csv_path   = csv_path
         self.video_dir  = video_dir
         self.config     = config
@@ -51,22 +44,22 @@ class WSMBodyDataset(Dataset):
             else self.dataset_name
         )
 
-        # параметры извлечения
+
         self.segment_length   = config.segment_length
         self.subset_size      = config.subset_size
         self.average_features = config.average_features  # 'raw'|'mean'|'mean_std'
         self.yolo_weights     = config.yolo_weights
         self.video_mode       = config.video_mode
 
-        # процессоры/экстракторы (только body)
+
         self.proc = modality_processors.get("body", None)
         self.extr = modality_feature_extractors.get("body", None)
         if self.proc is None:
-            raise ValueError("Нужен image processor для 'body' (CLIPProcessor/AutoImageProcessor).")
+            raise ValueError("An image processor is required for 'body' (CLIPProcessor/AutoImageProcessor).")
         if self.extr is None:
-            raise ValueError("Нужен extractor для 'body' (CLIP/VIT).")
+            raise ValueError("An extractor is required for 'body' (CLIP/VIT).")
 
-        # кэш
+
         self.save_prepared_data = config.save_prepared_data
         self.save_feature_path  = config.save_feature_path
         self.store = FeatureStore(self.save_feature_path)
@@ -76,7 +69,7 @@ class WSMBodyDataset(Dataset):
         required = {"video_id", "diagnosis", "segment_file"}
         missing = required - set(df.columns)
         if missing:
-            raise ValueError(f"CSV должен содержать столбцы {sorted(required)}. Отсутствуют: {sorted(missing)}")
+            raise ValueError(f"CSV must contain columns {sorted(required)}. Missing: {sorted(missing)}")
         if self.subset_size > 0:
             df = df.head(self.subset_size)
         logging.info(
@@ -87,7 +80,7 @@ class WSMBodyDataset(Dataset):
 
         self.corpus = self._detect_corpus(self.csv_path, self.video_dir)
 
-        # meta (пути + лейбл)
+
         self.meta: List[Dict[str, Any]] = []
         if self.save_prepared_data:
             self.meta = self.store.load_meta(
@@ -101,10 +94,10 @@ class WSMBodyDataset(Dataset):
                     self.subset_size, self.meta
                 )
 
-        # подготовим/дозаполним кэш фич
+
         self._prepare_body_cache()
 
-    # ───────────────────── helpers ───────────────────── #
+
 
     @staticmethod
     def _detect_corpus(csv_path: str, video_dir: str) -> str:
@@ -128,14 +121,9 @@ class WSMBodyDataset(Dataset):
         return 0
 
     def _segment_path(self, base_dir: str, video_id: str, segment_file: str) -> str:
-        """
-        Идеальные условия: сегменты всегда по шаблону
-            <base_dir>/<video_id>/segments/<segment_file>
-        Абсолютные пути не ожидаем и не поддерживаем.
-        """
         p = os.path.join(base_dir, str(video_id), "segments", segment_file)
         if not os.path.exists(p):
-            raise FileNotFoundError(f"Ожидал сегмент по пути: {p}")
+            raise FileNotFoundError(f"Expected a segment at path: {p}")
         return p
 
     def _build_meta_only(self) -> None:
@@ -148,7 +136,7 @@ class WSMBodyDataset(Dataset):
 
             class_id = self._map_label(int(row["diagnosis"]))
 
-            # У тебя нет коллизий имён — берём stem(segment_file)
+
             sample_name = os.path.splitext(os.path.basename(seg))[0]
 
             self.meta.append({
@@ -180,7 +168,7 @@ class WSMBodyDataset(Dataset):
         if class_id == 2:
             return torch.tensor([0.0, 1.0], dtype=torch.float32)
         return torch.tensor([0.0, 0.0], dtype=torch.float32)
-    # ─────────────────── feature caching ─────────────────── #
+
 
     def _prepare_body_cache(self) -> None:
         if not self.meta:
@@ -201,7 +189,7 @@ class WSMBodyDataset(Dataset):
         if not missing:
             return
 
-        # быстрый индекс name -> vpath
+
         path_by_name = {m["sample_name"]: m["video_path"] for m in self.meta}
 
         for name in tqdm(
@@ -215,7 +203,7 @@ class WSMBodyDataset(Dataset):
                     store[name] = None
                     continue
 
-                # ROI тела → pixel_values [T,3,H,W]
+
                 _, body_pv = get_body_pixel_values(
                     video_path=vpath,
                     segment_length=self.segment_length,
@@ -239,12 +227,6 @@ class WSMBodyDataset(Dataset):
         torch.cuda.empty_cache()
 
     def _aggregate(self, feats: Any, average: str) -> Optional[dict]:
-        """
-        feats: {'embedding': Tensor [T,D] или [D]}
-        'raw'      -> {'seq': [T,D]}
-        'mean'     -> {'mean': [D]}
-        'mean_std' -> {'mean':[D],'std':[D]}
-        """
         if not isinstance(feats, dict):
             raise TypeError(f"Expected dict with key 'embedding', got {type(feats)}")
         emb = feats.get("embedding", None)
@@ -261,7 +243,7 @@ class WSMBodyDataset(Dataset):
         else:  # 'raw'
             return {"seq": emb}
 
-    # ───────────────────── dataset API ───────────────────── #
+
 
     def __len__(self) -> int:
         return len(self.meta)
@@ -270,7 +252,7 @@ class WSMBodyDataset(Dataset):
         base = self.meta[idx]
         name = base["sample_name"]
 
-        # достаём из кэша
+
         features = {}
         key = build_cache_key("body", self.extr, self.config)
         cache = self.store.get_store(

@@ -5,7 +5,7 @@ import os, cv2, torch, numpy as np
 from typing import Optional, Tuple, Sequence, Literal
 from ultralytics import YOLO
 
-# ── ленивая инициализация YOLO ────────────────────────────────────
+
 _YOLO: Optional[YOLO] = None
 def _lazy_yolo(weights_path: str) -> YOLO:
     global _YOLO
@@ -13,7 +13,7 @@ def _lazy_yolo(weights_path: str) -> YOLO:
         _YOLO = YOLO(weights_path)
     return _YOLO
 
-# ── утилиты ───────────────────────────────────────────────────────
+
 def select_uniform_frames(frames: Sequence[int], N: int) -> list[int]:
     N = int(N)
     if N <= 0 or len(frames) <= N:
@@ -29,13 +29,11 @@ def _to_pixel_values(image_rgb: np.ndarray, image_processor, device: str) -> Opt
     return pv.to(device) if isinstance(pv, torch.Tensor) else pv
 
 def _ultra_device_arg(device: str):
-    """ultralytics ждёт индекс cuda (0/1/..), либо 'cpu'/None."""
     if str(device).lower().startswith("cuda"):
         return 0
     return "cpu"
 
 def _largest_box_xyxy(results) -> Optional[tuple[int, int, int, int]]:
-    """Возвращает bbox (x1,y1,x2,y2) самого крупного объекта или None."""
     if not results:
         return None
     r0 = results[0]
@@ -60,14 +58,9 @@ def _run_yolo(
     iou: float,
     augment: bool,
 ):
-    """
-    Универсальный запуск YOLO без фолбэков:
-      - mode="stable" → ТОЛЬКО track(persist=True); если трекинга нет/ошибка — падаем.
-      - mode="fast"   → ТОЛЬКО predict(); если ошибка — падаем.
-    """
     if mode == "stable":
         if not hasattr(model, "track"):
-            raise RuntimeError("YOLO.track недоступен для mode='stable' (обнови ultralytics или выбери mode='fast').")
+            raise RuntimeError("YOLO.track is unavailable for mode='stable' (upgrade ultralytics or use mode='fast').")
         return model.track(
             im_rgb,
             persist=True,
@@ -81,7 +74,7 @@ def _run_yolo(
 
     # mode == "fast"
     if mode != "fast":
-        raise ValueError(f"Неизвестный режим YOLO: {mode!r} (ожидалось 'stable' или 'fast').")
+        raise ValueError(f"Unknown YOLO mode: {mode!r} (expected 'stable' or 'fast').")
     return model.predict(
         im_rgb,
         imgsz=imgsz,
@@ -92,23 +85,19 @@ def _run_yolo(
     )
 
 def _reset_yolo_tracker(model: YOLO) -> None:
-    """
-    Сбрасывает состояние трекера между видео, если оно есть.
-    Жёстко не падаем — но и не молчим, если структуры нет.
-    """
     pred = getattr(model, "predictor", None)
     if pred is None:
         return
-    # разные версии ultralytics: trackers(list) или tracker(single)
+
     trackers = getattr(pred, "trackers", None)
     tracker = getattr(pred, "tracker", None)
     if isinstance(trackers, (list, tuple)) and trackers and hasattr(trackers[0], "reset"):
         trackers[0].reset()
     elif tracker is not None and hasattr(tracker, "reset"):
         tracker.reset()
-    # иначе ничего не делаем — для fast-режима оно и не нужно
 
-# ── основной экстрактор тела ──────────────────────────────────────
+
+
 @torch.no_grad()
 def get_body_pixel_values(
     video_path: str,
@@ -117,22 +106,13 @@ def get_body_pixel_values(
     *,
     device: str = "cuda",
     yolo_weights: str = "modalities/video/checkpoints/body/best_YOLO.pt",
-    mode: Literal["stable", "fast"] = "stable",   # ← жёсткий выбор режима
+    mode: Literal["stable", "fast"] = "stable",
     yolo_conf: float = 0.01,
     yolo_iou: float = 0.5,
     yolo_imgsz: int = 640,
     yolo_augment: bool = False,
 ) -> Tuple[str, Optional[torch.Tensor]]:
-    """
-    Возвращает: (video_name, body_pixel_values [T,3,H,W] | None)
-    Логика:
-      1) равномерно выбираем segment_length кадров;
-      2) на каждом кадре берём bbox самого крупного тела:
-         - mode='stable': YOLO.track(persist=True)
-         - mode='fast':   YOLO.predict
-      3) если bbox нет — фолбэк на весь кадр (это ок, это не «фолбэк по ошибке», а логика пайплайна).
-      4) между видео сбрасываем трекер (в stable-режиме).
-    """
+
     model = _lazy_yolo(yolo_weights)
     device_arg = _ultra_device_arg(device)
 
@@ -169,14 +149,14 @@ def get_body_pixel_values(
                 box = _largest_box_xyxy(results)
                 if box is not None:
                     x1, y1, x2, y2 = box
-                    # ограничиваем координаты рамками изображения
+
                     x1 = max(x1, 0); y1 = max(y1, 0)
                     x2 = min(x2, im_rgb.shape[1]); y2 = min(y2, im_rgb.shape[0])
                     if x2 > x1 and y2 > y1:
                         roi = im_rgb[y1:y2, x1:x2]
                         pv = _to_pixel_values(roi, image_processor, device)
 
-                # фолбэк по бизнес-логике (нет бокса → весь кадр)
+
                 if pv is None:
                     pv = _to_pixel_values(im_rgb, image_processor, device)
 
@@ -186,5 +166,5 @@ def get_body_pixel_values(
     finally:
         cap.release()
 
-    body_tensor = torch.cat(batches, dim=0) if batches else None  # [T,3,H,W] или None
+    body_tensor = torch.cat(batches, dim=0) if batches else None
     return video_name, body_tensor

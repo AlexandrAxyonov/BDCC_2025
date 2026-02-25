@@ -7,10 +7,6 @@ from torch.utils.data import DataLoader, ConcatDataset
 from .dataset_wsm import WSMBodyDataset
 
 def wsm_collate_fn(batch: List[Dict[str, Any]]):
-    """
-    Простой коллатер: только имена, пути к видео и метки.
-    Никаких попыток склеивать фичи здесь — они лежат в кэше и подтянутся в тренере.
-    """
     batch = [b for b in batch if b is not None]
     if not batch:
         return None
@@ -28,7 +24,7 @@ def wsm_collate_fn(batch: List[Dict[str, Any]]):
         dim=0
     )
 
-    # multi-label : FloatTensor[B, 2] or [B, 3] — добавляем ТОЛЬКО если у всех элементов он есть
+
     has_ml = all(("label_ml" in b) and (b["label_ml"] is not None) for b in batch)
     if has_ml:
         labels_ml = torch.stack(
@@ -42,7 +38,7 @@ def wsm_collate_fn(batch: List[Dict[str, Any]]):
     else:
         labels_ml = None
 
-    # features оставляем как есть (dict), если тренеру нужно — он сам разберёт
+
     features = [b.get("features") for b in batch]
 
     out = {
@@ -58,14 +54,6 @@ def wsm_collate_fn(batch: List[Dict[str, Any]]):
 
 
 def make_wsm_dataset_and_loader(config, split: str) -> Tuple[ConcatDataset, DataLoader]:
-    """
-    Ожидаем, что в config.toml есть секции с именами, начинающимися на 'wsm_'.
-    Например:
-      [datasets.wsm_parkinson]
-      [datasets.wsm_depression]
-    Каждая секция должна иметь:
-      base_dir, csv_path, video_dir (с шаблонами {base_dir} и {split})
-    """
     ds_list = []
     single_task = str(getattr(config, "single_task", "none") or "none").lower()
     def _match_single_task(name: str) -> bool:
@@ -93,15 +81,15 @@ def make_wsm_dataset_and_loader(config, split: str) -> Tuple[ConcatDataset, Data
             video_dir=video_dir,
             config=config,
             split=split,
-            modality_processors=getattr(config, "modality_processors"),         # кладём заранее в config в main.py
-            modality_feature_extractors=getattr(config, "modality_extractors"), # то же самое
+            modality_processors=getattr(config, "modality_processors"),
+            modality_feature_extractors=getattr(config, "modality_extractors"),
             dataset_name=ds_name,
             device=getattr(config, "device", "cuda"),
         )
         ds_list.append(ds)
 
     if not ds_list:
-        raise ValueError(f"Для split='{split}' не найдено ни одного корпуса WSM.")
+        raise ValueError(f"No WSM corpus was found for split='{split}'.")
 
     dataset = ds_list[0] if len(ds_list) == 1 else ConcatDataset(ds_list)
     loader = DataLoader(

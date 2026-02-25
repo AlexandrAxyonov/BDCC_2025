@@ -55,17 +55,6 @@ def _pool_framewise(seq: torch.Tensor, mode: str) -> torch.Tensor:
 # -------------------------
 
 class ClipVideoExtractor:
-    """
-    CLIP vision encoder → per-frame features.
-    Identical logic to ViT: we operate on vision_model hidden states (D = hidden_size, e.g., 768)
-    and support the same output_mode values.
-
-    output_mode:
-      - "frame-cls"  (default): CLS per frame → [T, D]
-      - "frame-mean": mean over patch tokens per frame → [T, D]
-      - "tokens":     all patch tokens flattened → [T*(L-1), D]
-      - "pooled":     CLIP projection via get_image_features → [T, 512] (special case)
-    """
     def __init__(self,
                  model_name: str = "openai/clip-vit-base-patch32",
                  device: str = "cuda",
@@ -87,7 +76,7 @@ class ClipVideoExtractor:
                 images: Optional[Union[np.ndarray, list]] = None,
                 **_) -> Dict[str, torch.Tensor]:
 
-        # Normalize input → pixel_values [T,3,H,W]
+
         if pixel_values is None:
             if images is not None:
                 if isinstance(images, np.ndarray):
@@ -100,7 +89,7 @@ class ClipVideoExtractor:
                 imgs_cpu = [img.cpu() for img in face_tensor]
                 pixel_values = self.proc(images=imgs_cpu, return_tensors="pt")["pixel_values"]
             else:
-                # Empty input → empty tensor with correct width
+
                 if self.output_mode == "pooled":
                     D = self.model.visual_projection.out_features  # 512
                 else:
@@ -135,15 +124,6 @@ class ClipVideoExtractor:
 
 
 class VitVideoExtractor:
-    """
-    ViT → per-frame features.
-    Identical output_mode semantics to CLIP vision above.
-
-    output_mode:
-      - "frame-cls"  (default): CLS per frame → [T, D]
-      - "frame-mean": mean over patch tokens per frame → [T, D]
-      - "tokens":     all patch tokens flattened → [T*(L-1), D]
-    """
     def __init__(self,
                  model_name: str = "google/vit-base-patch16-224",
                  device: str = "cuda",
@@ -163,7 +143,7 @@ class VitVideoExtractor:
                 pixel_values: Optional[torch.Tensor] = None,
                 images: Optional[Union[np.ndarray, list]] = None,
                 **_) -> Dict[str, torch.Tensor]:
-        # Normalize input → pixel_values [T,3,H,W]
+
         if pixel_values is None:
             if images is not None:
                 if isinstance(images, np.ndarray):
@@ -211,6 +191,6 @@ def build_extractors_from_config(cfg) -> Dict[str, Any]:
                                            device=device,
                                            output_mode=output_mode)
         else:
-            raise ValueError(f"Video extractor '{vid_model}' не поддерживается (ожидается CLIP/VIT).")
+            raise ValueError(f"Video extractor '{vid_model}' is not supported (expected CLIP/VIT).")
 
     return ex

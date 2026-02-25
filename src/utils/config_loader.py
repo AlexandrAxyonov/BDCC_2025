@@ -5,24 +5,21 @@ import toml
 import logging
 
 class ConfigLoader:
-    """
-    Класс для загрузки и обработки конфигурации из `config.toml`.
-    """
 
     def __init__(self, config_path="config.toml"):
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Файл конфигурации `{config_path}` не найден!")
+            raise FileNotFoundError(f"Configuration file `{config_path}` was not found.")
 
         self.config = toml.load(config_path)
 
         # ---------------------------
-        # Общие параметры
+
         # ---------------------------
         general_cfg = self.config.get("general", {})
         self.use_telegram = general_cfg.get("use_telegram", False)
 
         # ---------------------------
-        # Пути к данным
+
         # ---------------------------
         self.datasets = self.config.get("datasets", {})
 
@@ -35,7 +32,7 @@ class ConfigLoader:
         self.prepare_only = dataloader_cfg.get("prepare_only", False)
 
         # ---------------------------
-        # Тренировка: общие
+
         # ---------------------------
         train_general = self.config.get("train", {}).get("general", {})
         self.random_seed = train_general.get("random_seed", 42)
@@ -51,7 +48,6 @@ class ConfigLoader:
         self.checkpoint_dir = train_general.get("checkpoint_dir","checkpoints")
         self.device = train_general.get("device", "cuda")
         self.selection_metric = train_general.get("selection_metric", "mean_combo")
-        self.add_similarity = train_general.get("add_similarity", True)
         self.class_weighting = train_general.get("class_weighting", "balanced")
         self.single_task = train_general.get("single_task", "none")
         self.num_prototypes_per_class = train_general.get("num_prototypes_per_class", 1)
@@ -63,21 +59,20 @@ class ConfigLoader:
         self.proto_temperature = train_general.get("proto_temperature", 0.1)
         self.proto_proj_enabled = train_general.get("proto_proj_enabled", False)
         self.proto_proj_dim = train_general.get("proto_proj_dim", 0)
-        self.num_archetypes = train_general.get("num_archetypes", 1)
         self.print_logits = train_general.get("print_logits", False)
         self.export_logits_raw = train_general.get("export_logits_raw", False)
 
         # ---------------------------
-        # Тренировка: параметры модели
+
         # ---------------------------
         train_model = self.config.get("train", {}).get("model", {})
 
-        # общее
-        self.model_name = train_model.get("model_name", "mamba")  # "mamba" или "transformer"
+
+        self.model_name = train_model.get("model_name", "mamba")
         self.multi_label = train_model.get("multi_label", False)
         self.multi_label_mode = train_model.get("multi_label_mode", "2way")
-        self.thr_dep = train_model.get("thr_dep", 0.5)  # "mamba" или "transformer"
-        self.thr_park = train_model.get("thr_park", 0.5)  # "mamba" или "transformer"
+        self.thr_dep = train_model.get("thr_dep", 0.5)
+        self.thr_park = train_model.get("thr_park", 0.5)
 
         self.model_name = train_model.get("model_name", "mamba")
         self.hidden_dim = train_model.get("hidden_dim", 256)
@@ -85,19 +80,19 @@ class ConfigLoader:
         self.out_features = train_model.get("out_features", 128)
         self.gate_mode = train_model.get("gate_mode", "None")
 
-        # transformer-специфика
+
         self.num_transformer_heads = train_model.get("num_transformer_heads", 8)
         self.positional_encoding   = train_model.get("positional_encoding", True)
         self.tr_layers             = train_model.get("tr_layers", 2)
 
-        # mamba-специфика
+
         self.mamba_d_state   = train_model.get("mamba_d_state", 8)
         self.mamba_ker_size  = train_model.get("mamba_ker_size", 3)
         self.mamba_layers    = train_model.get("mamba_layers", 2)
-        self.mamba_d_discr   = train_model.get("mamba_d_discr", None)  # можно оставить None
+        self.mamba_d_discr   = train_model.get("mamba_d_discr", None)
 
         # ---------------------------
-        # Тренировка: оптимизатор
+
         # ---------------------------
         train_optimizer = self.config.get("train", {}).get("optimizer", {})
         self.optimizer = train_optimizer.get("optimizer", "adam")
@@ -106,14 +101,14 @@ class ConfigLoader:
         self.momentum = train_optimizer.get("momentum", 0.9)
 
         # ---------------------------
-        # Тренировка: шедулер
+
         # ---------------------------
         train_scheduler = self.config.get("train", {}).get("scheduler", {})
         self.scheduler_type = train_scheduler.get("scheduler_type", "plateau")
         self.warmup_ratio = train_scheduler.get("warmup_ratio", 0.1)
 
         # ---------------------------
-        # Эмбеддинги
+
         # ---------------------------
         emb_cfg = self.config.get("embeddings", {})
         self.average_features = emb_cfg.get("average_features", "mean_std")
@@ -125,7 +120,7 @@ class ConfigLoader:
         self.emb_normalize = emb_cfg.get("emb_normalize", True)
 
         # ---------------------------
-        # Кэш
+
         # ---------------------------
         cache_cfg = self.config.get("cache", {})
         self.per_modality_cache = cache_cfg.get("per_modality_cache", True)
@@ -147,7 +142,7 @@ class ConfigLoader:
             logging.info(f"  CSV Path: {ds.get('csv_path', '')}")
             logging.info(f"  Video Dir: {ds.get('video_dir', '')}")
 
-        # Логируем обучающие параметры
+
         logging.info("--- Training Config ---")
         logging.info(f"DataLoader: batch_size={self.batch_size}, num_workers={self.num_workers}, shuffle={self.shuffle}")
         logging.info(f"Model Name: {self.model_name}")

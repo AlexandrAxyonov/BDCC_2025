@@ -1,124 +1,102 @@
 [general]
-use_telegram = true # Telegram notifications (you’ll need to provide your tokens)
-# ---------------------------
-# Настройки корпусов данных
-# ---------------------------
+use_telegram = true # Enable Telegram notifications (requires bot token and chat id in env).
 
-# Паркинсон
+# Dataset definitions.
 [datasets.wsm_parkinson]
 base_dir = "E:/WSM/"
 csv_path = "{base_dir}/parkinson/{split}_labels_segments_min_filtered.csv"
 video_dir = "{base_dir}/parkinson/{split}_labels/"
 
-
-# Депрессия
 [datasets.wsm_depression]
 base_dir = "E:/WSM/"
 csv_path = "{base_dir}/depression/{split}_labels_segments_min_filtered.csv"
 video_dir = "{base_dir}/depression/{split}_labels/"
 
-# ---------------------------
-# DataLoader параметры
-# ---------------------------
 [dataloader]
 num_workers = 0
 shuffle = true
-prepare_only = false      # только извлечение признаков, без обучения
+prepare_only = false # Extract/cache features only, skip training.
 
-# ---------------------------
-# Общие параметры тренировки
-# ---------------------------
 [train.general]
-random_seed = 42                  # фиксируем random seed для воспроизводимости (0 = каждый раз разный)
-subset_size = 0                  # ограничение на количество примеров (0 = использовать весь датасет)
-batch_size = 32                   # размер батча
-num_epochs = 100                   # число эпох тренировки
-max_patience = 10                 # максимальное число эпох без улучшений (для Early Stopping)
-save_best_model = true            # сохранять лучшую модель
-save_prepared_data = true         # сохранять извлеченные признаки (эмбеддинги)
-save_feature_path = './features/' # путь для сохранения эмбеддингов
-search_type = "exhaustive"        # стратегия поиска: "greedy", "exhaustive" или "none"
-early_stop_on = "test"            # dev или "test" набор для оптимизации параметров обучения
+random_seed = 42 # Reproducibility seed.
+subset_size = 0 # 0 means full dataset.
+batch_size = 32
+num_epochs = 100
+max_patience = 10
+save_best_model = true
+save_prepared_data = true
+save_feature_path = './features/'
+search_type = "exhaustive" # "greedy" | "exhaustive" | "none"
+early_stop_on = "test" # "dev" or "test"
 checkpoint_dir = "checkpoints"
-device = "cuda"           # "cuda" или "cpu", куда грузить модель
-selection_metric = "UAR"   # по какой метрике отслеживаем
-add_similarity = true     # считает косинусное сходство эмбеддингов модальностей (или эмбеддинга к некоторому «гайд-банку»/прототипам классов). Используется в MultiModalFusionModel
-class_weighting = "balanced" # "none"
-single_task = "parkinson"        # "none" | "depression" | "parkinson"
+device = "cuda" # "cuda" or "cpu"
+selection_metric = "UAR"
+class_weighting = "balanced" # "balanced" or "none"
+single_task = "none" # "none" | "depression" | "parkinson"
 num_prototypes_per_class = 9
-prototype_alpha = 0.05
 loss_final_weight = 1.0
 loss_cls_weight = 0.0
 loss_proto_weight = 0.0
-proto_similarity = "cosine" # "cosine" "inv_euclid"
+prototype_alpha = 0.05
+proto_similarity = "cosine" # "cosine" | "inv_euclid"
 proto_temperature = 0.1
 proto_proj_enabled = false
-proto_proj_dim = 0  # 0 = тот же размер, что hidden_dim
-num_archetypes = 9
+proto_proj_dim = 0 # 0 keeps hidden_dim.
 print_logits = false
-export_logits_raw = false   # true -> save raw logits instead of probs in pkl
+export_logits_raw = false # true saves raw logits instead of probabilities.
 
-# ---------------------------
-# Параметры модели
-# ---------------------------
 [train.model]
-# какую модель используем: "mamba" или "prototypes" transformer archetypes
-model_name            = "transformer"
+# Supported models: "mamba" | "transformer" | "prototypes".
+model_name = "prototypes"
 multi_label = false
-multi_label_mode = "onehot3"  # "2way" (dep/park -> control via thresholds) | "onehot3"
+multi_label_mode = "onehot3" # "2way" or "onehot3"
 thr_dep = 0.5
 thr_park = 0.5
 
-hidden_dim            = 128      # размер скрытого состояния
-out_features          = 512      # размер финальных признаков перед классификацией
-dropout               = 0.25     # dropout между слоями
-gate_mode             = "none"   #  t , d,  none
+hidden_dim = 128
+out_features = 512
+dropout = 0.25
+gate_mode = "none" # "none" | "t" | "d" | "bt" | "bd"
 
-# ---- параметры для VideoFormer ----
-num_transformer_heads = 2      # количество attention голов в трансформере
-positional_encoding   = false    # использовать ли позиционное кодирование
-tr_layers             = 2        # число transformer-блоков
+# VideoFormer parameters.
+num_transformer_heads = 2
+positional_encoding = false
+tr_layers = 5
 
-# ---- параметры для VideoMamba ----
-mamba_d_state         = 6        # внутреннее состояние mamba
-mamba_ker_size        = 5        # размер kernel
-mamba_layers          = 5        # число mamba-блоков
-# mamba_d_discr         = 64       # discr dim (если не нужен — null)
+# VideoMamba parameters.
+mamba_d_state = 6
+mamba_ker_size = 5
+mamba_layers = 5
+# mamba_d_discr = 64
 
-# ---------------------------
-# Параметры оптимизатора
-# ---------------------------
 [train.optimizer]
-optimizer = "adamw"        # тип оптимизатора: "adam", "adamw", "lion", "sgd", "rmsprop"
-lr = 1e-5                 # начальная скорость обучения
-weight_decay = 1e-4         # weight decay для регуляризации
-momentum = 0.9            # momentum (используется только в SGD)
+optimizer = "adamw" # "adam" | "adamw" | "lion" | "sgd" | "rmsprop"
+lr = 1e-5
+weight_decay = 1e-4
+momentum = 0.9 # Used by SGD.
 
-# ---------------------------
-# Параметры шедулера
-# ---------------------------
 [train.scheduler]
-scheduler_type = "none" # тип шедулера: "none", "plateau", "cosine", "onecycle" ил  и HuggingFace-стиль ("huggingface_linear", "huggingface_cosine" "huggingface_cosine_with_restarts" и т.д.)
-warmup_ratio = 0.1         # отношение количества warmup-итераций к общему числу шагов (0.1 = 10%)
+scheduler_type = "none" # "none" | "plateau" | "cosine" | "onecycle" | HF schedulers
+warmup_ratio = 0.1 # Fraction of warmup steps.
 
 [embeddings]
-average_features = "raw" # Усредненние фичей - "mean"| "mean_std" | "raw"
+average_features = "raw" # "mean" | "mean_std" | "raw"
 
-# Тип признаков, извлекаемых из видеоэкстрактора:
-# "frame-cls"  – CLS-вектор для каждого кадра (размерность hidden_size, напр. 768). Это дефолт, нормальный вариант для последовательностей по кадрам.
-# "frame-mean" – усреднение по всем батчам внутри кадра → [T, D].
-# "tokens"     – вернуть все батч-токены без усреднения, склеенные по времени → [T*(L-1), D]. Внимание: может сильно раздувать размер фичей.
-# "pooled"     – только для CLIP: стандартные эмбеддинги из get_image_features → [T, 512].
+# Feature type produced by the video extractor.
+# "frame-cls": per-frame CLS embeddings [T, D].
+# "frame-mean": token average per frame [T, D].
+# "tokens": all non-CLS tokens flattened over time.
+# "pooled": CLIP get_image_features output [T, 512].
 video_output_mode = "frame-cls"
 
-video_extractor = "openai/clip-vit-base-patch32" # google/vit-base-patch16-224 или "openai/clip-vit-base-patch32 " или google/vit-base-patch16-224-in21k
+video_extractor = "openai/clip-vit-base-patch32"
 yolo_weights = "./src/data_loading/best_YOLO.pt"
 video_mode = "stable" # "stable" (track) | "fast" (predict)
-segment_length = 60  # сколько кадров отобрать из всех возможных с равномерным шагом
+segment_length = 60
 emb_normalize = false
 
 [cache]
 per_modality_cache = true
 overwrite_modality_cache = false
-force_reextract = []      # можно ["audio", "face"] чтобы форсить только их
-preprocess_version = "v1" # если меняется get_metadata/препроц
+force_reextract = []
+preprocess_version = "v1"

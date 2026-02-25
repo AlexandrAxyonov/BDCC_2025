@@ -15,10 +15,10 @@ from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import f1_score, recall_score
 
-from src.models.models import VideoFormer, VideoFormer_with_Archetypes, VideoFormer_with_Prototypes
+from src.models.models import VideoFormer, VideoFormer_with_Prototypes, VideoMamba
 from src.utils.logger_setup import color_metric, color_split,dbg_check_logits, dbg_dump_logits
 from src.utils.schedulers import SmartScheduler
-from src.utils.losses import prototype_contrastive_loss, prototype_contrastive_loss_2
+from src.utils.losses import prototype_contrastive_loss
 import pickle
 
 CLASS_LABELS = {
@@ -28,7 +28,7 @@ CLASS_LABELS = {
 }
 ML_ONEHOT3 = {"onehot3", "3way", "3", "onehot"}
 
-# ───────────────────────── utils ─────────────────────────
+
 
 def seed_everything(seed: int):
     import random
@@ -50,7 +50,7 @@ def _stack_body_features(
 
     rows: List[torch.Tensor] = []
     keep_idx: List[int] = []
-    lengths: List[int] = []  # реальные длины (для маски в raw)
+    lengths: List[int] = []
 
     for i, feats in enumerate(features_list):
         if not feats or "body" not in feats or feats["body"] is None:
@@ -77,24 +77,24 @@ def _stack_body_features(
             continue
 
     if not rows:
-        raise RuntimeError("В батче нет пригодных body-фич. Проверь кэш и average_features.")
+        raise RuntimeError("No usable body features in the batch. Check cache and average_features.")
 
     if average_mode == "raw":
-        # 1) выравниваем по T_max внутри батча
+
         X = pad_sequence(rows, batch_first=True, padding_value=0.0)  # [B, T_max, D]
 
-        # 3) маска валидных таймстепов
+
         T = X.size(1)
         mask = torch.zeros(X.size(0), T, dtype=torch.bool, device=X.device)
         if lengths:
             for bi, L in enumerate(lengths):
                 mask[bi, :min(L, T)] = True
         else:
-            # на всякий случай (должно не происходить)
+
             mask[:] = True
 
     else:
-        # mean / mean_std → [B, D’], маска не нужна
+
         X = torch.stack(rows, dim=0)
         mask = None
 
@@ -116,7 +116,7 @@ def _gather_all_labels(loader: DataLoader, average_mode: str, segment_length: Op
         y = _filter_labels(batch["labels"], keep)
         ys.append(y.cpu().numpy())
     if not ys:
-        raise RuntimeError("Не удалось собрать метки с train-лоадера.")
+        raise RuntimeError("Failed to collect labels from the train loader.")
     return np.concatenate(ys, axis=0)
 
 def _num_classes_from_loader(loader: DataLoader, average_mode: str, segment_length: Optional[int] = None) -> int:
@@ -136,24 +136,57 @@ def _metrics(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> Dict[s
     return out
 
 
+def _save_eval_protocol_tsv(
+    out_path: str,
+    split_tag: str,
+    epoch_idx: int,
+    metrics: Dict[str, float],
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    names: List[str],
+    keys: List[str],
+) -> None:
+    """
+    Save a reproducible eval protocol as plain TSV:
+      - metadata and metrics in commented lines
+      - per-sample records with true/pred labels
+    """
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(f"# split={split_tag}\n")
+        f.write(f"# epoch={epoch_idx + 1}\n")
+        for mk in sorted(metrics.keys()):
+            mv = metrics[mk]
+            if isinstance(mv, (int, float)):
+                f.write(f"# {mk}={mv:.6f}\n")
+        f.write("video_path\tsample_name\ty_true\ty_pred\ttrue_name\tpred_name\n")
+        for i in range(len(y_true)):
+            t = int(y_true[i])
+            p = int(y_pred[i])
+            t_name = CLASS_LABELS.get(t, f"class{t}")
+            p_name = CLASS_LABELS.get(p, f"class{p}")
+            k = keys[i] if i < len(keys) else f"idx_{i}"
+            n = names[i] if i < len(names) else f"sample_{i}"
+            f.write(f"{k}\t{n}\t{t}\t{p}\t{t_name}\t{p_name}\n")
+
+
 def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: torch.device) -> nn.Module:
     model_name = cfg.model_name.lower()  # "mamba" | "transformer"
 
     if model_name in ("mamba", "vmamba", "video_mamba"):
-        # model = VideoMamba(
-        #     input_dim=input_dim,
-        #     hidden_dim=cfg.hidden_dim,
-        #     mamba_d_state=cfg.mamba_d_state,
-        #     mamba_ker_size=cfg.mamba_ker_size,
-        #     mamba_layer_number=cfg.mamba_layers,
-        #     d_discr=getattr(cfg, "mamba_d_discr", None),
-        #     dropout=cfg.dropout,
-        #     seg_len=seq_len,
-        #     out_features=cfg.out_features,
-        #     num_classes=num_classes,
-        #     device=str(device)
-        # )
-        print("Мамбы нет")
+        model = VideoMamba(
+            input_dim=input_dim,
+            hidden_dim=cfg.hidden_dim,
+            mamba_d_state=cfg.mamba_d_state,
+            mamba_ker_size=cfg.mamba_ker_size,
+            mamba_layer_number=cfg.mamba_layers,
+            d_discr=getattr(cfg, "mamba_d_discr", None),
+            dropout=cfg.dropout,
+            seg_len=seq_len,
+            out_features=cfg.out_features,
+            num_classes=num_classes,
+            device=str(device),
+        )
     elif model_name in ("transformer", "former", "videoformer", "tr"):
         model = VideoFormer(
             input_dim=input_dim,
@@ -186,27 +219,12 @@ def _build_model(cfg, input_dim: int, seq_len: int, num_classes: int, device: to
             proto_proj_dim=getattr(cfg, "proto_proj_dim", 0),
         )
 
-    elif model_name == "archetypes":
-        model = VideoFormer_with_Archetypes(
-            input_dim=input_dim,
-            hidden_dim=cfg.hidden_dim,
-            num_transformer_heads=cfg.num_transformer_heads,
-            positional_encoding=cfg.positional_encoding,
-            dropout=cfg.dropout,
-            tr_layer_number=cfg.tr_layers,
-            seg_len=seq_len,
-            out_features=cfg.out_features,
-            num_classes=num_classes,
-            num_archetypes=cfg.num_archetypes,
-            commit_beta=getattr(cfg, "commit_beta", 0.25),
-        )
-
     else:
-        raise ValueError(f"Неизвестная модель ='{cfg.model_name}'. Используй 'mamba' или 'transformer'.")
+        raise ValueError(f"Unknown model='{cfg.model_name}'. Use 'mamba' or 'transformer'.")
     return model.to(device)
 
 
-# ───────────────────── multi-label helpers ─────────────────────
+
 
 def _gather_pos_weight_for_ml(loader: DataLoader, average_mode: str, segment_length: Optional[int] = None) -> torch.Tensor:
     """
@@ -235,13 +253,6 @@ def _gather_pos_weight_for_ml(loader: DataLoader, average_mode: str, segment_len
 
 def _map_probs_to_single_label(p_dep: np.ndarray, p_park: np.ndarray,
                                t_dep: float = 0.5, t_park: float = 0.5) -> np.ndarray:
-    """
-    Маппинг двух вероятностей в {0,1,2}:
-      оба < t → 0 (control)
-      dep ≥ t & park < t → 1
-      park ≥ t & dep < t → 2
-      оба ≥ t → выбираем по max(p)
-    """
     assert p_dep.shape == p_park.shape
     dep = p_dep >= t_dep
     par = p_park >= t_park
@@ -265,15 +276,15 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
             avg_mode: str, metrics_num_classes: int, model_name: str,
             multi_label: bool = False,
             thr_dep: float = 0.5, thr_park: float = 0.5,
-            segment_length: Optional[int] = None) -> Dict[str, float]:
-    """
-    metrics_num_classes:
-      - single-label: 3 (control/depression/parkinson)
-      - multi-label:  3 (після маппинга двух голов в 3 класса)
-    """
+            segment_length: Optional[int] = None,
+            protocol_dir: Optional[str] = None,
+            split_tag: Optional[str] = None,
+            epoch_idx: Optional[int] = None) -> Dict[str, float]:
     model.eval()
     ml_mode = str(getattr(cfg, "multi_label_mode", "2way") or "2way").lower()
     all_y, all_p = [], []
+    all_names: List[str] = []
+    all_keys: List[str] = []
 
     # for batch in tqdm(loader, desc="Eval", leave=False):
     for bidx, batch in enumerate(tqdm(loader, desc="Eval", leave=False)):
@@ -286,7 +297,7 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
 
         y = _filter_labels(batch["labels"], keep).to(device)
         if X.ndim == 2:
-            X = X.unsqueeze(1)  # → [B,1,D’]
+            X = X.unsqueeze(1)
 
         # logits = model(X.to(device))  # [B,C]
 
@@ -303,31 +314,6 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
                 dbg_check_logits(final_logits=final, cls_logits=cls_l, proto_logits=proto_l, print_logits=cfg.print_logits,  prefix="[DBG:VAL]")
             logits = final
             # logits = cls_l
-
-        elif model_name == "archetypes":
-            logits, vq_loss, idx = model(
-                X.to(device, non_blocking=True),
-                mask=mask.to(device, non_blocking=True) if mask is not None else None
-                )
-            if bidx == 0:
-
-                # 1) использование архетипов в батче
-                K = int(getattr(model, "num_archetypes", getattr(cfg, "num_archetypes", 0)))
-                counts = torch.bincount(idx, minlength=K).detach().cpu()
-                used = int((counts > 0).sum().item())
-                maxc = int(counts.max().item()) if counts.numel() else 0
-                total = int(counts.sum().item()) if counts.numel() else 0
-                max_frac = (maxc / max(1, total))
-
-                logging.info(f"[ARC:VAL] used={used}/{K} max_count={maxc} max_frac={max_frac:.3f}")
-
-                # 2) проверка “не убивает ли маска”
-                if mask is not None:
-                    logging.info(f"[ARC:VAL] mask_mean={mask.float().mean().item():.3f}")
-
-
-
-                dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=7, max_cols=logits.size(1))
         else:
             logits =  model(
                 X.to(device, non_blocking=True),
@@ -335,7 +321,7 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
             )
             if bidx == 0:
                 # _dbg_check_logits(final_logits=logits, prefix="[DBG:VAL]")
-                print('123')
+
                 dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:VAL:final]", max_rows=5, max_cols=logits.size(1))
 
         if not multi_label:
@@ -352,22 +338,34 @@ def _eval_epoch(cfg, model: nn.Module, loader: DataLoader, device: torch.device,
 
         all_y.append(y.cpu())
         all_p.append(pred.cpu())
+        if "names" in batch:
+            all_names.extend([str(batch["names"][i]) for i in keep])
+        if "video_paths" in batch:
+            all_keys.extend([str(batch["video_paths"][i]) for i in keep])
 
     if not all_y:
         return {}
     y_true = torch.cat(all_y).numpy()
     y_pred = torch.cat(all_p).numpy()
-    return _metrics(y_true, y_pred, metrics_num_classes)
+    met = _metrics(y_true, y_pred, metrics_num_classes)
+    if protocol_dir and split_tag is not None and epoch_idx is not None:
+        out_file = os.path.join(protocol_dir, f"{split_tag}_epoch{epoch_idx + 1:03d}.tsv")
+        _save_eval_protocol_tsv(
+            out_path=out_file,
+            split_tag=split_tag,
+            epoch_idx=epoch_idx,
+            metrics=met,
+            y_true=y_true,
+            y_pred=y_pred,
+            names=all_names,
+            keys=all_keys,
+        )
+    return met
 
 
-# ───────────────────────── helpers for early stopping ──────────────────────
+
 
 def _score_for_split(metrics_map: Dict[str, float], selection_metric: str) -> float:
-    """
-    Берём среднее по всем ключам вида '{selection_metric}_<dataset>'.
-    Если таких ключей нет — пытаемся взять прямой ключ selection_metric.
-    Если и его нет — fallback: UAR -> MF1 -> -1.
-    """
     if not metrics_map:
         return -1.0
     pref = f"{selection_metric}_"
@@ -393,7 +391,7 @@ def export_logits_to_pkl(
     loader: DataLoader,
     device: torch.device,
     avg_mode: str,
-    model_name: str,      # "prototypes" или "transformer"
+    model_name: str,
     out_path: str,
     multi_label: bool,
     segment_length: int | None,
@@ -402,7 +400,7 @@ def export_logits_to_pkl(
     out = {}  # dict[video_path] -> dict
     export_raw = bool(getattr(cfg, "export_logits_raw", False))
 
-    for batch in tqdm(loader, desc=f"Export logits → {out_path}", leave=False):
+    for batch in tqdm(loader, desc=f"Export logits -> {out_path}", leave=False):
         if batch is None:
             continue
 
@@ -410,15 +408,15 @@ def export_logits_to_pkl(
         if len(keep) == 0:
             continue
 
-        # обязательно должны быть (у тебя они есть)
+
         if "names" not in batch or "video_paths" not in batch:
-            raise KeyError("export_logits_to_pkl ожидает batch['names'] и batch['video_paths']")
+            raise KeyError("export_logits_to_pkl expects batch['names'] and batch['video_paths']")
 
         if X.ndim == 2:
             X = X.unsqueeze(1)
 
-        names = [str(batch["names"][i]) for i in keep]          # читаемое имя
-        keys  = [str(batch["video_paths"][i]) for i in keep]    # уникальный ключ (путь)
+        names = [str(batch["names"][i]) for i in keep]
+        keys  = [str(batch["video_paths"][i]) for i in keep]
 
         Xd = X.to(device, non_blocking=True)
         md = mask.to(device, non_blocking=True) if mask is not None else None
@@ -441,7 +439,7 @@ def export_logits_to_pkl(
             embeddings = embeddings.detach().cpu()
 
         else:
-            # baseline transformer: берем embeddings после pooling (return_embeddings=True)
+
             logits, embeddings = model(Xd, mask=md, return_embeddings=True)
 
             if export_raw:
@@ -450,14 +448,14 @@ def export_logits_to_pkl(
                 final_v = _probs_from_logits(logits, multi_label).detach().cpu()
             embeddings = embeddings.detach().cpu()
 
-            # чтобы "формы совпали" — кладем векторы [C] из NaN
+
             C = final_v.size(1)
             cls_v   = torch.full((final_v.size(0), C), float("nan"))
             proto_v = torch.full((final_v.size(0), C), float("nan"))
 
         for i in range(len(keys)):
             k = keys[i]
-            # защита от перезаписи, если вдруг ключ повторится
+
             if k in out:
                 k = f"{k}__dup{i}"
 
@@ -482,12 +480,12 @@ def export_logits_to_pkl(
     with open(out_path, "wb") as f:
         pickle.dump(out, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    logging.info(f"[EXPORT] saved {len(out)} files → {out_path}")
+    logging.info(f"[EXPORT] saved {len(out)} files -> {out_path}")
 
 
 
 
-# ───────────────────────── train loop ─────────────────────
+
 
 def train(
     cfg,
@@ -495,11 +493,6 @@ def train(
     dev_loaders: Dict[str, DataLoader] | None = None,
     test_loaders: Dict[str, DataLoader] | None = None,
 ):
-    """
-    Single-label: CE + class weights + UAR/MF1.
-    Multi-label:  BCEWithLogits + pos_weight + маппинг в 3 класса для метрик.
-    Ранняя остановка по cfg.selection_metric на cfg.early_stop_on (dev|test).
-    """
     seed_everything(cfg.random_seed)
     device = torch.device(cfg.device)
     avg_mode = cfg.average_features.lower()
@@ -513,7 +506,7 @@ def train(
             first = b
             break
     if first is None:
-        raise RuntimeError("train loader пустой (или collate всё фильтрует).")
+        raise RuntimeError("Train loader is empty (or collate filters everything).")
     X0, _, _ = _stack_body_features(first["features"], avg_mode, segment_length=cfg.segment_length)
 
     if X0.ndim == 3:   # raw: [B0, T, D]
@@ -524,9 +517,9 @@ def train(
         seq_len = 1
 
 
-    # число выходов модели и число классов для метрик
+
     # model_num_classes: 3 (single) / 2 (multi)
-    # metrics_num_classes: всегда 3 (control, depression, parkinson)
+
     if multi_label:
         if ml_mode in ML_ONEHOT3:
             model_num_classes = 3
@@ -552,29 +545,29 @@ def train(
             CLASS_LABELS = {0: "control", 1: "depression", 2: "parkinson"}
             metrics_num_classes = model_num_classes
 
-    # ─── class weights / pos_weight ─────────────────────────────────────
+
     if not multi_label:
         if cfg.class_weighting == "none":
             ce_weights = None
-            logging.info("⚖️ Class weighting: none (веса отключены)")
+            logging.info("Class weighting: none (disabled)")
         else:
             y_all = _gather_all_labels(mm_loader, avg_mode, segment_length=cfg.segment_length)
             classes = np.arange(model_num_classes)
             class_weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_all)
             ce_weights = torch.tensor(class_weights, dtype=torch.float32, device=device)
-            logging.info(f"⚖️ Class weighting: balanced → {class_weights.tolist()}")
+            logging.info(f"Class weighting: balanced -> {class_weights.tolist()}")
     else:
-        # pos_weight для BCE по двум головам
-        pos_weight = _gather_pos_weight_for_ml(mm_loader, avg_mode, segment_length=cfg.segment_length).to(device)
-        logging.info(f"⚖️ pos_weight (BCE) → {pos_weight.cpu().numpy().tolist()}")
 
-    # модель/опт/лосс
+        pos_weight = _gather_pos_weight_for_ml(mm_loader, avg_mode, segment_length=cfg.segment_length).to(device)
+        logging.info(f"pos_weight (BCE) -> {pos_weight.cpu().numpy().tolist()}")
+
+
     model = _build_model(cfg, in_dim, seq_len, model_num_classes, device)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info(f"[MODEL] params total={total_params:,} trainable={trainable_params:,}")
 
-    # ─── Оптимизатор ──────────────────────────────────────────────────
+
     if cfg.optimizer == "adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     elif cfg.optimizer == "adamw":
@@ -586,10 +579,10 @@ def train(
     elif cfg.optimizer == "rmsprop":
         optimizer = torch.optim.RMSprop(model.parameters(), lr=cfg.lr)
     else:
-        raise ValueError(f"⛔ Неизвестный оптимизатор: {cfg.optimizer}")
-    logging.info(f"⚙️ Оптимизатор: {cfg.optimizer}, learning rate: {cfg.lr}")
+        raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
+    logging.info(f"Optimizer: {cfg.optimizer}, learning rate: {cfg.lr}")
 
-    # ─── Scheduler ────────────────────────────────────────────────────
+
     steps_per_epoch = sum(1 for b in mm_loader if b is not None)
     # steps_per_epoch = len(mm_loader)
     scheduler = SmartScheduler(
@@ -599,7 +592,7 @@ def train(
         steps_per_epoch=steps_per_epoch
     )
 
-    # ─── Лосс ─────────────────────────────────────────────────────────
+
     if not multi_label:
         # criterion = nn.CrossEntropyLoss(weight=(ce_weights if 'ce_weights' in locals() else None))
         criterion = nn.CrossEntropyLoss(weight=ce_weights)
@@ -608,7 +601,7 @@ def train(
     else:
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    # конфиг для ранней остановки/выбора лучшего
+
     selection_metric = cfg.selection_metric
     early_stop_on = cfg.early_stop_on
 
@@ -616,9 +609,11 @@ def train(
     best_dev, best_test = {}, {}
     patience = 0
     best_ckpt_path = None
+    protocol_dir = os.path.join(cfg.checkpoint_dir, "eval_protocol")
+    os.makedirs(protocol_dir, exist_ok=True)
 
     for epoch in range(cfg.num_epochs):
-        logging.info(f"═══ EPOCH {epoch+1}/{cfg.num_epochs} ═══")
+        logging.info(f"=== EPOCH {epoch+1}/{cfg.num_epochs} ===")
         model.train()
         tot_loss, tot_n = 0.0, 0
         tr_y, tr_p = [], []
@@ -630,7 +625,7 @@ def train(
             X, keep, mask = _stack_body_features(batch["features"], avg_mode, segment_length=cfg.segment_length)
 
 
-            # таргеты
+
             y_idx = _filter_labels(batch["labels"], keep).to(device)
             if not multi_label:
                 y = y_idx
@@ -640,7 +635,7 @@ def train(
                 y = batch["labels_ml"][keep].to(device)
 
             if X.ndim == 2:
-                X = X.unsqueeze(1)  # [B,1,D’]
+                X = X.unsqueeze(1)
 
             # logits = model(X.to(device))  # [b,C]
             # logits = model(
@@ -671,31 +666,11 @@ def train(
                     loss_terms.append(w_proto * criterion(proto_l, y))
                 loss = sum(loss_terms) if loss_terms else torch.zeros((), device=final.device)
 
-                if batch_idx == 0:  # печатаем один раз за эпоху
+                if batch_idx == 0:
                     dbg_dump_logits(final, cfg.print_logits,   prefix="[DBG:TRAIN:final]", max_rows=5, max_cols=final.size(1))
                     dbg_dump_logits(cls_l, cfg.print_logits, prefix="[DBG:TRAIN:cls]",   max_rows=5, max_cols=cls_l.size(1))
                     dbg_dump_logits(proto_l, cfg.print_logits, prefix="[DBG:TRAIN:proto]", max_rows=5, max_cols=proto_l.size(1))
                     dbg_check_logits(final_logits=final, cls_logits=cls_l, proto_logits=proto_l, print_logits= cfg.print_logits, prefix="[DBG:TRAIN]")
-
-            elif cfg.model_name.lower() == "archetypes":
-                logits, vq_loss, idx = model(
-                    X.to(device, non_blocking=True),
-                    mask=mask.to(device, non_blocking=True) if mask is not None else None
-                )
-                if batch_idx == 0:
-
-                    K = int(getattr(model, "num_archetypes", getattr(cfg, "num_archetypes", 0)))
-                    counts = torch.bincount(idx, minlength=K).detach().cpu()
-                    used = int((counts > 0).sum().item())
-                    maxc = int(counts.max().item()) if counts.numel() else 0
-                    total = int(counts.sum().item()) if counts.numel() else 0
-                    max_frac = (maxc / max(1, total))
-                    logging.info(f"[ARC:TRAIN] used={used}/{K} max_count={maxc} max_frac={max_frac:.3f}")
-                    if mask is not None:
-                        logging.info(f"[ARC:TRAIN] mask_mean={mask.float().mean().item():.3f}")
-
-                    dbg_dump_logits(logits, cfg.print_logits, prefix="[DBG:TRAIN:final]", max_rows=7, max_cols=logits.size(1))
-                loss = criterion(logits, y)
             else:
                 logits =  model(
                     X.to(device, non_blocking=True),
@@ -716,12 +691,8 @@ def train(
                     similarity=getattr(cfg, "proto_similarity", "cosine"),
                 )
 
-                alpha = cfg.prototype_alpha  # можно настраивать
+                alpha = cfg.prototype_alpha
                 loss = loss + alpha * cont_loss
-
-            elif cfg.model_name.lower() == "archetypes":
-                vq_lambda = getattr(cfg, "vq_lambda", 0.25)
-                loss = loss + vq_lambda * vq_loss
 
             loss.backward()
             optimizer.step()
@@ -732,7 +703,7 @@ def train(
             tot_loss += loss.item() * bs
             tot_n += bs
 
-            # онлайновые train-метрики (в single — argmax, в multi — маппинг в 3 класса с порогами по умолчанию)
+
             if not multi_label:
                 tr_y.append(y_idx.cpu())
                 tr_p.append(logits.argmax(dim=1).detach().cpu())
@@ -766,9 +737,9 @@ def train(
                     parts.append(color_metric(key, m_tr[key]))
             logging.info(f"[{color_split('TRAIN')}] " + " | ".join(parts))
         else:
-            logging.info(f"[{color_split('TRAIN')}] Loss={train_loss:.4f} | (пустые метрики)")
+            logging.info(f"[{color_split('TRAIN')}] Loss={train_loss:.4f} | (no metrics)")
 
-        # ── Оценка DEV/TEST ──
+
         cur_dev = {}
         if dev_loaders:
             for name, ldr in dev_loaders.items():
@@ -781,10 +752,13 @@ def train(
                     thr_dep=getattr(cfg,"thr_dep",0.5),
                     thr_park=getattr(cfg,"thr_park",0.5),
                     segment_length=cfg.segment_length,
+                    protocol_dir=protocol_dir,
+                    split_tag=f"dev_{name}",
+                    epoch_idx=epoch,
                 )
                 if md:
                     cur_dev.update({f"{k}_{name}": v for k, v in md.items()})
-                    msg = " · ".join(color_metric(k, v) for k, v in md.items())
+                    msg = " | ".join(color_metric(k, v) for k, v in md.items())
                     logging.info(f"[{color_split('DEV')}:{name}] {msg}")
 
         cur_test = {}
@@ -798,13 +772,16 @@ def train(
                     thr_dep=getattr(cfg, "thr_dep", 0.5),
                     thr_park=getattr(cfg, "thr_park", 0.5),
                     segment_length=cfg.segment_length,
+                    protocol_dir=protocol_dir,
+                    split_tag=f"test_{name}",
+                    epoch_idx=epoch,
                 )
                 if mt:
                     cur_test.update({f"{k}_{name}": v for k, v in mt.items()})
-                    msg = " · ".join(color_metric(k, v) for k, v in mt.items())
+                    msg = " | ".join(color_metric(k, v) for k, v in mt.items())
                     logging.info(f"[{color_split('TEST')}:{name}] {msg}")
 
-        # ── Ранняя остановка по cfg.selection_metric на сплите cfg.early_stop_on ──
+
         eval_map = cur_dev if early_stop_on == "dev" else cur_test
         score = _score_for_split(eval_map, selection_metric)
 
@@ -818,7 +795,7 @@ def train(
             ckpt = Path(cfg.checkpoint_dir) / f"best_ep{epoch+1}_{early_stop_on}_{selection_metric}_{best_score:.4f}.pt"
             torch.save(model.state_dict(), ckpt)
             best_ckpt_path = str(ckpt)
-            logging.info(f"✔ Saved best model ({early_stop_on}/{selection_metric}={best_score:.4f}): {ckpt.name}")
+            logging.info(f"Saved best model ({early_stop_on}/{selection_metric}={best_score:.4f}): {ckpt.name}")
         else:
             patience += 1
             if patience >= cfg.max_patience:
@@ -883,3 +860,4 @@ def train(
     # ======================================
 
     return best_dev, best_test
+

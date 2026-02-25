@@ -16,7 +16,7 @@ from __future__ import annotations
 import os, datetime, requests
 from typing import Dict, Optional
 
-# ───────────────── helpers ─────────────────
+
 
 def _htime(seconds: float) -> str:
     seconds = int(max(0, seconds))
@@ -72,7 +72,7 @@ def _fmt_params(cfg, results_dir: str) -> Dict[str, str]:
     }
 
 
-# ───────────────── public API ─────────────────
+
 
 def tg_start(cfg, results_dir: str, enabled: bool = True) -> bool:
     title = f"🚀 <b>Start</b>: {getattr(cfg, 'model_name', 'model')}"

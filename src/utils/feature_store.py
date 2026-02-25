@@ -7,7 +7,7 @@ import torch
 
 
 # ---------------------------
-# 1) Ключ кэша
+
 # ---------------------------
 
 @dataclass(frozen=True)
@@ -19,7 +19,7 @@ class CacheKey:
     pre_v: str = "v1"
 
     def short_id(self) -> str:
-        # Санитизация для Windows: \ / : * ? " < > | и пробелы → '-'
+
         def _sanitize(s: str) -> str:
             bad = '\\/:*?"<>|'
             t = []
@@ -42,11 +42,8 @@ class CacheKey:
 
 
 def build_cache_key(mod: str, extractor: Any, cfg: Any) -> CacheKey:
-    """
-    Собираем CacheKey для 'body'.
-    """
     if mod != "body":
-        raise ValueError(f"Unsupported modality '{mod}', ожидается 'body'.")
+        raise ValueError(f"Unsupported modality '{mod}', expected 'body'.")
 
     fp_fn = getattr(extractor, "fingerprint", None)
     extractor_fp = fp_fn() if callable(fp_fn) else type(extractor).__name__
@@ -61,12 +58,12 @@ def build_cache_key(mod: str, extractor: Any, cfg: Any) -> CacheKey:
         extractor_fp=extractor_fp,
         avg=avg,
         frames=frames,
-        pre_v=f"{pre_v}-{mode}",   # закодируем в pre_v
+        pre_v=f"{pre_v}-{mode}",
     )
 
 
 # ---------------------------
-# 2) Утилиты сохранения/загрузки
+
 # ---------------------------
 
 def _safe_makedirs(path: str): os.makedirs(path, exist_ok=True)
@@ -83,7 +80,7 @@ def _atomic_save_pickle(obj: Any, path: str):
 
 
 # ---------------------------
-# 3) Хранилище фичей
+
 # ---------------------------
 
 class FeatureStore:
@@ -141,7 +138,7 @@ class FeatureStore:
 
 
 # ---------------------------
-# 4) Вспомогалки
+
 # ---------------------------
 
 def need_full_reextract(cfg: Any, mod: str, old_header: Optional[CacheKey], new_key: CacheKey) -> bool:

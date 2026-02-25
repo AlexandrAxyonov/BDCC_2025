@@ -2,7 +2,7 @@
 # hidden_dim = [128, 256]
 # out_features = [64, 128, 256, 512]
 # num_transformer_heads = [2,4,8]
-# tr_layers = [2, 3, 4, 5]
+# tr_layers = [2, 3]
 # dropout = [0.15, 0.2, 0.25, 0.3]
 hidden_dim = [128]
 # prototype_alpha = [0.0]
